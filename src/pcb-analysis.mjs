@@ -122,7 +122,7 @@ function identity(value) {
   return identity(value.name || value.uuid || value.libraryUuid || value.id || JSON.stringify(value));
 }
 
-export function compareSchematicToPcb(schematicComponents, snapshot) {
+export function compareSchematicToPcb(schematicComponents, snapshot, schematicNetNames = []) {
   const schematicByDesignator = new Map(); const pcbByDesignator = new Map();
   for (const item of schematicComponents || []) {
     const key = String(item.designator || "").trim().toUpperCase();
@@ -156,7 +156,7 @@ export function compareSchematicToPcb(schematicComponents, snapshot) {
       ? [{ field, schematic: left, pcb: right }] : []);
     if (differences.length) mismatches.push({ designator, differences });
   }
-  const schematicNets = new Set((schematicComponents || []).flatMap((component) => component.nets || []).filter(Boolean));
+  const schematicNets = new Set([...(schematicNetNames || []), ...(schematicComponents || []).flatMap((component) => component.nets || [])].filter(Boolean));
   const pcbNets = new Set((snapshot?.nets || []).map(netName).filter(Boolean));
   return {
     schematicComponentCount: schematicComponents?.length || 0, pcbComponentCount: snapshot?.components?.length || 0,

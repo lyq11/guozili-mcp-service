@@ -1,6 +1,6 @@
 {
   "name": "guozili-mcp-service",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "type": "module",
   "description": "果子狸MCP服务：嘉立创EDA专业版的本地结构化MCP服务",

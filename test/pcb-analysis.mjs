@@ -35,8 +35,9 @@ const consistency = compareSchematicToPcb([
 ], { ...snapshot, components: [
   { designator: "R1", footprint: { name: "0603" }, manufacturerId: "XYZ" },
   { designator: "R2", footprint: "0402" },
-] });
+] }, ["SIG", "SCHEMATIC_ONLY"]);
 assert.deepEqual(consistency.missingOnPcb, ["R3"]);
 assert.deepEqual(consistency.extraOnPcb, ["R2"]);
 assert.equal(consistency.mismatches[0].designator, "R1");
+assert.deepEqual(consistency.nets.schematicOnly, ["SCHEMATIC_ONLY"]);
 console.log("pcb-analysis: ok");

@@ -144,6 +144,7 @@ export class ProjectCache {
     this.scope = null;
     this.pages = new Map();
     this.components = [];
+    this.nets = [];
     this.pageErrors = new Map();
     this.initializedAt = null;
     this.initializePromise = null;
@@ -157,6 +158,7 @@ export class ProjectCache {
     this.scope = null;
     this.pages.clear();
     this.components = [];
+    this.nets = [];
     this.pageErrors.clear();
     this.initializedAt = null;
     this.initializePromise = null;
@@ -248,13 +250,18 @@ export class ProjectCache {
 
   #rebuildComponentIndex() {
     this.components = [];
+    const nets = new Set();
     for (const [pageUuid, snapshot] of this.pages) {
       const pageName = snapshot.value?.page?.name || null;
+      for (const wire of snapshot.value?.wires || []) if (wire.net) nets.add(wire.net);
+      for (const label of snapshot.value?.netLabels || []) if (label.net) nets.add(label.net);
       for (const component of snapshot.value?.components || []) {
+        if (component.net) nets.add(component.net);
         if (component.type !== "part") continue;
         this.components.push(componentRecord(pageUuid, pageName, component));
       }
     }
+    this.nets = [...nets];
   }
 
   async getComponentInventory({ groupBy = "model", includeSingletons = true } = {}) {
@@ -300,6 +307,11 @@ export class ProjectCache {
     return this.components.map((component) => ({ ...component }));
   }
 
+  async getNets() {
+    if (!this.catalog) await this.initialize();
+    return [...this.nets];
+  }
+
   async rebuildCatalog() {
     return this.initialize({ force: true });
   }
@@ -312,6 +324,7 @@ export class ProjectCache {
       scope: this.scope,
       pageCount: this.pages.size,
       componentCount: this.components.length,
+      netCount: this.nets.length,
       failedPageCount: this.pageErrors.size,
       failedPages: [...this.pageErrors.entries()].map(([pageUuid, error]) => ({ pageUuid, error })),
       ttlMs: this.ttlMs,

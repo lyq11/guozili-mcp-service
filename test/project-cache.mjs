@@ -17,7 +17,7 @@ const bridge = {
           { key: "Voltage Rated", value: params.pageUuid === "page-1" ? "25V" : "50V" },
           { key: "Manufacturer Part", value: params.pageUuid === "page-1" ? "CAP-A" : "CAP-B" },
         ],
-      }], wires: [{ id: `wire-${params.pageUuid}` }],
+      }], wires: [{ id: `wire-${params.pageUuid}`, net: params.pageUuid === "page-1" ? "GND" : "VCC" }],
     };
     throw new Error(`Unexpected call: ${method}`);
   },
@@ -27,6 +27,8 @@ const cache = new ProjectCache(bridge, { ttlMs: 60_000 });
 await cache.initialize();
 assert.equal(cache.status().pageCount, 2);
 assert.equal(cache.status().componentCount, 2);
+assert.equal(cache.status().netCount, 2);
+assert.deepEqual((await cache.getNets()).sort(), ["GND", "VCC"]);
 assert.equal(cache.status().failedPageCount, 0);
 const inspectCount = calls.filter((call) => call.method === "schematic.inspectPage").length;
 assert.equal(inspectCount, 2, "initialization should inspect every page once");

@@ -94,8 +94,8 @@ export function registerPcbTools({ server, z, bridge, writes, projectCache, pcbC
     inputSchema: { refresh: z.boolean().default(false) },
   }, async ({ refresh }) => {
     try {
-      const [components, pcb] = await Promise.all([projectCache.getComponents(), pcbCache.getSnapshot({ refresh })]);
-      return toolResult(compareSchematicToPcb(components, pcb));
+      const [components, nets, pcb] = await Promise.all([projectCache.getComponents(), projectCache.getNets(), pcbCache.getSnapshot({ refresh })]);
+      return toolResult(compareSchematicToPcb(components, pcb, nets));
     } catch (error) { return toolError(error); }
   });
 
