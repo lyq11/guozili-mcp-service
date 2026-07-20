@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>果子狸MCP服务</title>
+  <style>
+    /* 等待状态：黄色表示插件正在扫描本机 MCP 端口，并非故障。 */
+    body {
+      margin: 0;
+      background: #101826;
+      color: #e6edf7;
+      font: 13px system-ui, "Microsoft YaHei", sans-serif;
+    }
+    .card { padding: 18px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f2b84b;
+      box-shadow: 0 0 12px #f2b84b;
+    }
+    .state { font-size: 17px; font-weight: 700; }
+    .sub { margin-top: 14px; color: #9fb0c8; line-height: 1.7; }
+    .tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 9px;
+      background: #3c321b;
+      color: #ffd174;
+    }
+  </style>
+</head>
+<body>
+  <!-- 端口扫描与自动重试逻辑位于 src/index.ts 的 scanAndConnect。 -->
+  <div class="card">
+    <div class="row">
+      <span class="dot"></span>
+      <span class="state">等待 MCP 服务</span>
+      <span class="tag">扫描中</span>
+    </div>
+    <div class="sub">正在扫描 127.0.0.1:49620–49629<br>可从插件菜单手动重新连接</div>
+  </div>
+</body>
+</html>

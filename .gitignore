@@ -1,0 +1,9 @@
+.cache/
+__pycache__/
+.env
+node_modules/
+.cache/
+easyeda-extension/node_modules/
+easyeda-extension/dist/
+docs/LCEDA_PRO_API_RAW_HTML.zip
+npm-debug.log*

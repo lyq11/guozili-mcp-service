@@ -1,0 +1,18 @@
+{
+  "name": "guozili-mcp-service-extension",
+  "version": "0.2.0",
+  "private": true,
+  "description": "果子狸MCP服务的嘉立创EDA专业版扩展",
+  "license": "Apache-2.0",
+  "scripts": {
+    "compile": "node build.mjs --compile",
+    "build": "node build.mjs",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@jlceda/pro-api-types": "^0.2.21",
+    "esbuild": "^0.28.1",
+    "jszip": "^3.10.1",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "guozili-mcp-service",
+  "uuid": "e6818569b67a4b3c9eb00426a52aab6c",
+  "displayName": "果子狸MCP服务",
+  "description": "通过本机结构化白名单 RPC 将嘉立创 EDA 专业版原理图安全接入 MCP 客户端。",
+  "version": "0.2.0",
+  "publisher": "lyq11",
+  "engines": {
+    "eda": "~3.2.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "github",
+    "url": "https://github.com/lyq11/guozili-mcp-service"
+  },
+  "categories": ["Schematic", "Other"],
+  "keywords": ["MCP", "AI", "RPC", "EasyEDA", "嘉立创EDA", "原理图"],
+  "images": {
+    "logo": "./images/logo.png"
+  },
+  "homepage": "https://github.com/lyq11/guozili-mcp-service#readme",
+  "bugs": "https://github.com/lyq11/guozili-mcp-service/issues",
+  "activationEvents": {
+    "onStartupFinished": true
+  },
+  "entry": "./dist/index",
+  "dependentExtensions": {},
+  "headerMenus": {
+    "home": [{
+      "id": "GuoziliMcp",
+      "title": "果子狸MCP服务",
+      "menuItems": [
+        { "id": "Reconnect", "title": "重新连接", "registerFn": "reconnect" },
+        { "id": "StatusPanel", "title": "显示状态悬浮框", "registerFn": "showStatusPanel" },
+        { "id": "Stop", "title": "停止连接", "registerFn": "stopConnection" },
+        { "id": "About", "title": "连接状态", "registerFn": "about" }
+      ]
+    }],
+    "sch": [{
+      "id": "GuoziliMcp",
+      "title": "果子狸MCP服务",
+      "menuItems": [
+        { "id": "Reconnect", "title": "重新连接", "registerFn": "reconnect" },
+        { "id": "StatusPanel", "title": "显示状态悬浮框", "registerFn": "showStatusPanel" },
+        { "id": "Stop", "title": "停止连接", "registerFn": "stopConnection" },
+        { "id": "About", "title": "连接状态", "registerFn": "about" }
+      ]
+    }]
+  }
+}

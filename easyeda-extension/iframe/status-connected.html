@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>果子狸MCP服务</title>
+  <style>
+    /* 连接成功状态：绿色指示灯，正文说明当前启用的是白名单 RPC。 */
+    body {
+      margin: 0;
+      background: #101826;
+      color: #e6edf7;
+      font: 13px system-ui, "Microsoft YaHei", sans-serif;
+    }
+    .card { padding: 18px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #35d07f;
+      box-shadow: 0 0 12px #35d07f;
+    }
+    .state { font-size: 17px; font-weight: 700; }
+    .sub { margin-top: 14px; color: #9fb0c8; line-height: 1.7; }
+    .tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 9px;
+      background: #173a2a;
+      color: #75e6a9;
+    }
+  </style>
+</head>
+<body>
+  <!-- 此页面只展示状态；连接控制逻辑位于 src/index.ts。 -->
+  <div class="card">
+    <div class="row">
+      <span class="dot"></span>
+      <span class="state">MCP 已连接</span>
+      <span class="tag">RPC v1</span>
+    </div>
+    <div class="sub">白名单接口已启用<br>本会话首次写入自动备份一次</div>
+  </div>
+</body>
+</html>

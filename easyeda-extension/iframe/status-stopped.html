@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>果子狸MCP服务</title>
+  <style>
+    /* 停止状态：灰色表示用户主动停止，插件不会自动重试。 */
+    body {
+      margin: 0;
+      background: #101826;
+      color: #e6edf7;
+      font: 13px system-ui, "Microsoft YaHei", sans-serif;
+    }
+    .card { padding: 18px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #728096; }
+    .state { font-size: 17px; font-weight: 700; }
+    .sub { margin-top: 14px; color: #9fb0c8; line-height: 1.7; }
+    .tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 9px;
+      background: #252f3d;
+      color: #b5c0d0;
+    }
+  </style>
+</head>
+<body>
+  <!-- 用户可从插件菜单调用 reconnect，恢复端口扫描。 -->
+  <div class="card">
+    <div class="row">
+      <span class="dot"></span>
+      <span class="state">MCP 已停止</span>
+      <span class="tag">离线</span>
+    </div>
+    <div class="sub">连接已由用户停止<br>可从插件菜单选择“重新连接”</div>
+  </div>
+</body>
+</html>
