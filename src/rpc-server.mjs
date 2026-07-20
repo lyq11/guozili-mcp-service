@@ -103,7 +103,7 @@ export class EasyEdaRpcServer {
   /** 完成握手、鉴权、心跳应答和 RPC 结果分发。 */
   #handleConnection(socket) {
     this.#log("connected");
-    const connection = { authenticated: false, windowId: null, capabilities: [] };
+    const connection = { authenticated: false, windowId: null, extensionVersion: null, capabilities: [] };
     socket.send(JSON.stringify({
       type: "handshake",
       service: "easyeda-mcp",
@@ -130,6 +130,7 @@ export class EasyEdaRpcServer {
         connection.authenticated = true;
         // windowId 用来区分多个 EasyEDA 窗口；缺失时由 MCP 生成。
         connection.windowId = String(message.windowId || randomUUID());
+        connection.extensionVersion = typeof message.extensionVersion === "string" ? message.extensionVersion : null;
         connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities : [];
         this.windows.set(connection.windowId, { socket, connection, registeredAt: new Date().toISOString() });
         this.#log("registered", { windowId: connection.windowId, capabilities: connection.capabilities });
@@ -203,6 +204,7 @@ export class EasyEdaRpcServer {
       protocolVersion: PROTOCOL_VERSION,
       connectedWindows: [...this.windows.entries()].map(([windowId, value]) => ({
         windowId,
+        extensionVersion: value.connection.extensionVersion,
         registeredAt: value.registeredAt,
         capabilities: value.connection.capabilities,
       })),
