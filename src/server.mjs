@@ -47,6 +47,13 @@ const operationSchema = z.discriminatedUnion("type", [
     addIntoPcb: z.boolean().default(true),
   }),
   z.object({
+    type: z.literal("move_component"),
+    pageUuid: z.string().min(1),
+    componentId: z.string().min(1),
+    x: z.number(),
+    y: z.number(),
+  }),
+  z.object({
     type: z.literal("create_wire"),
     pageUuid: z.string(),
     line: z.array(z.number()).min(4).refine((line) => line.length % 2 === 0, "line must contain x/y pairs"),
@@ -102,7 +109,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.4.0" },
+  { name: "guozili-mcp-service", version: "0.4.1" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",
@@ -149,10 +156,10 @@ server.registerTool(
   },
 );
 
-// 工具：读取当前原理图的页面目录。
+// 工具：读取当前工程的原理图和页面目录；不要求先打开图页。
 server.registerTool(
   "schematic_list_pages",
-  { description: "List every page in the active EasyEDA schematic." },
+  { description: "List every schematic and page in the open EasyEDA project, even when no page is currently open." },
   async () => {
     try { return toolResult(await bridge.call("schematic.listPages")); }
     catch (error) { return toolError(error); }
@@ -354,6 +361,21 @@ registerWriteTool(
     reason: z.string().min(1).max(500).default("批量放置原理图器件"),
   },
   ({ pageUuid, components }) => components.map((component) => ({ type: "create_component", pageUuid, ...component })),
+);
+
+registerWriteTool(
+  "schematic_move_components",
+  "Move one or more existing part components to absolute schematic coordinates. Inspect the page first to obtain primitive IDs.",
+  {
+    pageUuid: z.string().min(1),
+    movements: z.array(z.object({
+      componentId: z.string().min(1),
+      x: z.number(),
+      y: z.number(),
+    })).min(1).max(50),
+    reason: z.string().min(1).max(500).default("移动既有原理图器件"),
+  },
+  ({ pageUuid, movements }) => movements.map((movement) => ({ type: "move_component", pageUuid, ...movement })),
 );
 
 registerWriteTool(

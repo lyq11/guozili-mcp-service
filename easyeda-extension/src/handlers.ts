@@ -53,14 +53,35 @@ async function systemHealth(): Promise<unknown> {
   };
 }
 
-/** 列出当前原理图的全部图页，不改变任何文档内容。 */
+/**
+ * 列出当前工程中的全部原理图及图页，不要求先打开任一图页。
+ * 同时保留顶层 pages 扁平数组，兼容已经使用 schematic_list_pages 的 MCP 客户端。
+ */
 async function listPages(): Promise<unknown> {
-  const schematic = await eda.dmt_Schematic.getCurrentSchematicInfo();
-  if (!schematic) throw new Error('No active schematic');
-  const pages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo();
+  let project = null;
+  try { project = await eda.dmt_Project.getCurrentProjectInfo(); } catch {}
+  const schematicItems = await eda.dmt_Schematic.getAllSchematicsInfo();
+  if (!project && schematicItems.length === 0) throw new Error('No open project');
+  const schematics = schematicItems.map(schematic => ({
+    uuid: schematic.uuid,
+    name: schematic.name,
+    boardName: schematic.parentBoardName,
+    pages: schematic.page.map((page, index) => ({
+      index: index + 1,
+      uuid: page.uuid,
+      name: page.name,
+      schematicUuid: schematic.uuid,
+      schematicName: schematic.name,
+    })),
+  }));
+  const pages = schematics.flatMap(schematic => schematic.pages.map(page => ({
+    ...page,
+    boardName: schematic.boardName,
+  })));
   return {
-    schematic: { uuid: schematic.uuid, name: schematic.name, boardName: schematic.parentBoardName },
-    pages: pages.map((page, index) => ({ index: index + 1, uuid: page.uuid, name: page.name })),
+    project: project ? { uuid: project.uuid, name: project.name, friendlyName: project.friendlyName } : null,
+    schematics,
+    pages,
   };
 }
 
@@ -123,8 +144,11 @@ async function searchComponents(params: JsonObject): Promise<unknown> {
  */
 async function validateOperations(params: JsonObject): Promise<unknown> {
   const operations = operationsParam(params);
-  const pages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo();
+  // 工程级读取不依赖当前焦点图页，因此关闭所有图页后仍可以校验目标 pageUuid。
+  const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
   const pageIds = new Set(pages.map(page => page.uuid));
+  const pageToSchematic = new Map(pages.map(page => [page.uuid, page.parentSchematicUuid]));
+  const affectedSchematicIds = new Set<string>();
   const findings: JsonObject[] = [];
   for (let index = 0; index < operations.length; index += 1) {
     const operation = operations[index];
@@ -132,28 +156,38 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
     const pageUuid = String(operation.pageUuid || '');
     if (!ALLOWED_OPERATIONS.has(type)) { findings.push({ index, level: 'error', message: 'Unsupported operation', type }); continue; }
     if (pageUuid && !pageIds.has(pageUuid)) { findings.push({ index, level: 'error', message: 'Schematic page does not exist', pageUuid }); continue; }
-    if (type === 'delete_page' && pages.length <= 1) findings.push({ index, level: 'error', message: 'Cannot delete the only schematic page' });
+    if (pageUuid) affectedSchematicIds.add(String(pageToSchematic.get(pageUuid)));
+    if (type === 'delete_page') {
+      const schematicUuid = pageToSchematic.get(pageUuid);
+      const siblingCount = pages.filter(page => page.parentSchematicUuid === schematicUuid).length;
+      if (siblingCount <= 1) findings.push({ index, level: 'error', message: 'Cannot delete the only schematic page' });
+    }
     // 只有引用现有图元的操作需要打开页面并核对 ID。
-    if (type === 'delete_primitives' || type === 'connect_pins') {
+    if (type === 'delete_primitives' || type === 'connect_pins' || type === 'move_component') {
       await openPage(pageUuid);
       const componentIds = new Set(await eda.sch_PrimitiveComponent.getAllPrimitiveId());
       const wireIds = new Set(await eda.sch_PrimitiveWire.getAllPrimitiveId());
       if (type === 'delete_primitives') {
         for (const id of (operation.componentIds as string[] || [])) if (!componentIds.has(id)) findings.push({ index, level: 'error', message: 'Component not found', id });
         for (const id of (operation.wireIds as string[] || [])) if (!wireIds.has(id)) findings.push({ index, level: 'error', message: 'Wire not found', id });
-      } else {
+      } else if (type === 'connect_pins') {
         for (const endpoint of [operation.from, operation.to] as JsonObject[]) {
           if (!endpoint || !componentIds.has(String(endpoint.componentId))) findings.push({ index, level: 'error', message: 'Endpoint component not found', id: endpoint?.componentId });
         }
+      } else if (!componentIds.has(String(operation.componentId))) {
+        findings.push({ index, level: 'error', message: 'Component not found', id: operation.componentId });
       }
     }
+  }
+  if (affectedSchematicIds.size > 1) {
+    findings.push({ level: 'error', message: 'One write request cannot span multiple schematics' });
   }
   return { valid: !findings.some(item => item.level === 'error'), findings, pageCount: pages.length };
 }
 
 // 插件最终允许执行的写操作集合；即使绕过 MCP Schema，也不能调用集合外方法。
 const ALLOWED_OPERATIONS = new Set([
-  'rename_page', 'delete_page', 'delete_primitives', 'create_component', 'create_wire',
+  'rename_page', 'delete_page', 'delete_primitives', 'create_component', 'move_component', 'create_wire',
   'connect_pins', 'create_net_port', 'create_net_flag', 'create_text',
 ]);
 
@@ -209,6 +243,9 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
   const operations = operationsParam(params);
   const validation = await validateOperations(params) as {valid: boolean; findings: unknown[]};
   if (!validation.valid) throw new Error(`Operation validation failed: ${JSON.stringify(validation.findings)}`);
+  // 没有活动图页时先打开本批操作的目标页，确保后续获取原理图和创建备份指向正确文档。
+  const firstPageUuid = operations.map(operation => String(operation.pageUuid || '')).find(Boolean);
+  if (firstPageUuid) await openPage(firstPageUuid);
   const schematic = await eda.dmt_Schematic.getCurrentSchematicInfo();
   if (!schematic) throw new Error('No active schematic');
   // 备份只在本会话第一次写当前原理图时发生，失败则阻止任何后续修改。
@@ -244,6 +281,25 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
         if (!component) throw new Error('Component creation failed');
         if (operation.designator) { component.setState_Designator(String(operation.designator)); await component.done(); }
         value = { componentId: component.getState_PrimitiveId(), designator: component.getState_Designator() };
+        break;
+      }
+      case 'move_component': {
+        // 使用官方 modify 接口设置绝对坐标；仅允许移动普通器件，网络端口和标志不走此入口。
+        const componentId = String(operation.componentId);
+        const existing = await eda.sch_PrimitiveComponent.get(componentId);
+        if (!existing || Array.isArray(existing)) throw new Error(`Component not found: ${componentId}`);
+        const before = { x: existing.getState_X(), y: existing.getState_Y() };
+        const moved = await eda.sch_PrimitiveComponent.modify(componentId, {
+          x: Number(operation.x),
+          y: Number(operation.y),
+        });
+        if (!moved) throw new Error(`Component move failed: ${componentId}`);
+        value = {
+          componentId,
+          designator: moved.getState_Designator(),
+          before,
+          after: { x: moved.getState_X(), y: moved.getState_Y() },
+        };
         break;
       }
       case 'create_wire': {

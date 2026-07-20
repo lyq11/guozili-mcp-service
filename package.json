@@ -1,6 +1,6 @@
 {
   "name": "guozili-mcp-service",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "果子狸MCP服务：嘉立创EDA专业版的本地结构化MCP服务",
@@ -12,6 +12,7 @@
     "check": "node --check src/server.mjs && node --check src/rpc-server.mjs && node --check src/transactions.mjs && node --check src/readability.mjs && node --check src/pin-layout.mjs",
     "test:pin-layout": "node test/pin-layout.mjs",
     "test:rpc": "node test/rpc-server.mjs",
+    "test:tools": "node test/smoke.mjs --tools-only",
     "test:smoke": "node test/smoke.mjs"
   },
   "engines": {

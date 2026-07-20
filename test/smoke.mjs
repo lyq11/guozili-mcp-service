@@ -9,7 +9,7 @@ const transport = new StdioClientTransport({
   cwd: process.cwd(),
   stderr: "inherit",
 });
-const client = new Client({ name: "easyeda-mcp-smoke", version: "0.3.0" });
+const client = new Client({ name: "easyeda-mcp-smoke", version: "0.4.1" });
 
 await client.connect(transport);
 // 工具清单是外部契约；缺少任一名称都应立即失败。
@@ -26,6 +26,7 @@ const expected = [
   "schematic_delete_page",
   "schematic_delete_primitives",
   "schematic_place_components",
+  "schematic_move_components",
   "schematic_create_wires",
   "schematic_connect_pin_pairs",
   "schematic_create_net_flags",
@@ -40,6 +41,20 @@ for (const name of expected) {
 const applyTool = tools.tools.find((tool) => tool.name === "schematic_apply_operations");
 if (!JSON.stringify(applyTool?.inputSchema).includes("create_port_for_pin")) {
   throw new Error("Missing create_port_for_pin operation schema");
+}
+if (!JSON.stringify(applyTool?.inputSchema).includes("move_component")) {
+  throw new Error("Missing move_component operation schema");
+}
+const moveTool = tools.tools.find((tool) => tool.name === "schematic_move_components");
+if (!JSON.stringify(moveTool?.inputSchema).includes("movements")) {
+  throw new Error("Invalid schematic_move_components input schema");
+}
+
+// 发布构建可只验证工具契约，不要求 EasyEDA 此时已经加载最新版扩展。
+if (process.argv.includes("--tools-only")) {
+  console.log(JSON.stringify({ toolCount: names.length, tools: names }, null, 2));
+  await client.close();
+  process.exit(0);
 }
 
 // 以下调用需要真实 EasyEDA 插件已连接到本机 RPC 网关。
