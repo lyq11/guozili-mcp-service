@@ -1,6 +1,6 @@
 # 果子狸MCP服务
 
-果子狸MCP服务把嘉立创 EDA / EasyEDA 专业版原理图连接到支持 MCP 的 AI 客户端。项目由两部分组成：
+果子狸MCP服务把嘉立创 EDA / EasyEDA 专业版原理图和 PCB 连接到支持 MCP 的 AI 客户端。项目由两部分组成：
 
 - `easyeda-extension/`：安装在嘉立创 EDA 专业版中的扩展，只执行明确列入白名单的结构化操作。
 - `src/server.mjs`：运行在本机的 MCP stdio 服务，同时监听 `127.0.0.1:49620-49629`，供扩展自动发现和连接。
@@ -16,8 +16,12 @@
 - 创建导线、网络端口和网络标识，并按完整端口矩形自动避让器件与导线。
 - 读取并修改器件原生属性，可真正写入和显示 `Value`，供属性面板、BOM 与后续检查使用。
 - 执行原理图 DRC，并原样返回当前 EasyEDA 版本提供的结果。
+- 只缓存关联 `[main]` 原理图的 PCB Board，包括板框、层、封装、焊盘、网络、走线、过孔、铺铜和设计规则。
+- 检查 PCB 未布线网络、封装重叠、板外器件、原理图一致性和原生 DRC。
+- 安全地成组移动、旋转和锁定封装，并使用显式规则创建走线、过孔和铺铜或从原理图导入变更。
 - 分析器件密度、交叉连线、网络端口方向等可读性问题。
 - 每次 MCP 进程首次修改一份原理图前自动创建一次完整备份；同一会话后续操作复用该安全点。
+- 每次 MCP 进程首次修改一块 PCB 前自动创建游离 `[backup]` 副本；备份不会进入 `[main]` PCB 缓存。
 - 在编辑器中显示连接状态悬浮框。
 
 完整工具列表见 [docs/EASYEDA_MCP_TOOLS.md](docs/EASYEDA_MCP_TOOLS.md)，实现与协议见 [docs/EASYEDA_MCP_ARCHITECTURE.md](docs/EASYEDA_MCP_ARCHITECTURE.md)。
@@ -97,7 +101,7 @@ npm run build
 生成的扩展包位于：
 
 ```text
-easyeda-extension/dist/guozili-mcp-service_v0.2.8.eext
+easyeda-extension/dist/guozili-mcp-service_v0.3.0.eext
 ```
 
 扩展安装并打开原理图后，可在仓库根目录执行联机冒烟测试：

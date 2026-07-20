@@ -11,14 +11,20 @@ import { analyzeReadability } from "./readability.mjs";
 import { annotatePagePinLayouts, planPortForPin } from "./pin-layout.mjs";
 import { OCCUPANCY, PageOccupancyCache } from "./page-occupancy.mjs";
 import { ProjectCache } from "./project-cache.mjs";
+import { PcbCache } from "./pcb-cache.mjs";
+import { registerPcbTools } from "./pcb-tools.mjs";
 
 // bridge 管理插件连接；writes 提供会话 ID 和写入串行化。
 const bridge = new EasyEdaRpcServer();
 const writes = new WriteCoordinator();
 const pageOccupancy = new PageOccupancyCache();
 const projectCache = new ProjectCache(bridge);
-bridge.onRegistration(() => projectCache.initialize({ force: true }));
-bridge.onDisconnection(() => projectCache.clear());
+const pcbCache = new PcbCache(bridge, projectCache);
+bridge.onRegistration(async () => {
+  await projectCache.initialize({ force: true });
+  await pcbCache.initialize({ force: true });
+});
+bridge.onDisconnection(() => { projectCache.clear(); pcbCache.clear(); });
 // 先占用本地端口，再启动 MCP stdio，插件可以随时连接。
 await bridge.start();
 
@@ -166,7 +172,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.4.20" },
+  { name: "guozili-mcp-service", version: "0.5.0" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",
@@ -174,7 +180,9 @@ const server = new McpServer(
       "Prefer direct connect_pins wires inside one functional block.",
       "Use create_port_for_pin for cross-page connections, power rails, or genuinely long connections so the port extends outward from the pin.",
       "The first write in each MCP session automatically creates one full schematic backup; later writes reuse it.",
-      "PCB synchronization is intentionally outside this MCP version.",
+      "Only the PCB Board associated with a [main] schematic is cached and writable.",
+      "Inspect and run PCB checks before writes; the first PCB write in each session creates one detached [backup] PCB.",
+      "Track width, via dimensions, pour width, routing layer, and net are always explicit user-controlled inputs.",
     ].join(" "),
   },
 );
@@ -207,7 +215,7 @@ server.registerTool(
       await projectCache.ensureContext();
       const context = projectCache.context;
       const connection = await bridge.status();
-      return toolResult({ connection, context, cache: projectCache.status() });
+      return toolResult({ connection, context, cache: projectCache.status(), pcbCache: pcbCache.status() });
     } catch (error) {
       return toolError(error);
     }
@@ -460,6 +468,8 @@ async function executeOperations(operations, reason) {
     }
   }
 }
+
+registerPcbTools({ server, z, bridge, writes, projectCache, pcbCache, toolResult, toolError });
 
 /** 注册一个把简洁参数转换成白名单 operation 的直接写工具。 */
 function registerWriteTool(name, description, inputSchema, buildOperations) {

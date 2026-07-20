@@ -449,6 +449,15 @@ MCP 会根据器件原点和 PIN 的画布绝对坐标补充布局信息：
 
 部分 EasyEDA Pro 版本只返回错误和警告数量。
 
+## PCB 工具
+
+- 缓存与读取：`pcb_list_boards`、`pcb_inspect`、`pcb_inspect_region`。
+- 检查：`pcb_check`、`pcb_find_unrouted_nets`、`pcb_check_component_overlaps`、`pcb_check_outside_components`、`pcb_check_schematic_consistency`、`pcb_run_drc`。
+- 安全写入：`pcb_transform_components`、`pcb_create_tracks`、`pcb_create_vias`、`pcb_create_pours`、`pcb_rebuild_pours`、`pcb_sync_from_schematic`。
+- `pcb_fix_deterministic` 会先运行 DRC，再重建指定或全部铺铜，最后再次运行 DRC；不会自动修改线宽、间距、过孔或高电流网络规则。
+- 所有 PCB 坐标和尺寸均使用 mil。走线层/线宽、过孔孔径/外径、铺铜层/边界宽度及网络必须显式提供。
+- 初始化与写入只允许关联 `[main]` 原理图且 PCB 名不含 `[backup]` 的 Board。每个会话首次 PCB 写入前会创建一个游离 `[backup]` 副本。
+
 ## 推荐调用顺序
 
 ```text
@@ -467,7 +476,7 @@ schematic_inspect_page / schematic_analyze_readability（复核）
 
 ## 当前限制
 
-- 尚未开放 PCB 布局和布线工具。
+- PCB 未布线分析用焊盘中心、直线走线和过孔建立连通图；弧形走线及铺铜会标记为不确定，最终以 EasyEDA 飞线和 DRC 为准。
 - 写操作不是原子事务，中途失败不会自动恢复。
 - 会话安全点按 MCP 进程识别，MCP 重启后第一次写入会创建新备份。
 - `connect_pins` 尚未实现避障寻路。

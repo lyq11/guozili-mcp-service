@@ -42,6 +42,23 @@ const expected = [
   "schematic_set_component_attributes",
   "schematic_create_texts",
   "schematic_run_drc",
+  "pcb_list_boards",
+  "pcb_inspect",
+  "pcb_inspect_region",
+  "pcb_check",
+  "pcb_find_unrouted_nets",
+  "pcb_check_component_overlaps",
+  "pcb_check_outside_components",
+  "pcb_check_schematic_consistency",
+  "pcb_run_drc",
+  "pcb_apply_operations",
+  "pcb_transform_components",
+  "pcb_create_tracks",
+  "pcb_create_vias",
+  "pcb_create_pours",
+  "pcb_rebuild_pours",
+  "pcb_fix_deterministic",
+  "pcb_sync_from_schematic",
 ];
 const names = tools.tools.map((tool) => tool.name);
 for (const name of expected) {
@@ -103,6 +120,15 @@ const freeRegionsTool = tools.tools.find((tool) => tool.name === "schematic_find
 if (!JSON.stringify(freeRegionsTool?.inputSchema).includes("clearance")) {
   throw new Error("Invalid schematic_find_free_regions input schema");
 }
+const pcbApplyTool = tools.tools.find((tool) => tool.name === "pcb_apply_operations");
+const pcbApplySchema = JSON.stringify(pcbApplyTool?.inputSchema);
+for (const operation of ["transform_components", "create_track", "create_via", "create_pour", "rebuild_pours", "import_schematic_changes"]) {
+  if (!pcbApplySchema.includes(operation)) throw new Error(`Missing PCB operation schema: ${operation}`);
+}
+const pcbTrackTool = tools.tools.find((tool) => tool.name === "pcb_create_tracks");
+if (!JSON.stringify(pcbTrackTool?.inputSchema).includes("width")) throw new Error("PCB tracks must require explicit width");
+const pcbViaTool = tools.tools.find((tool) => tool.name === "pcb_create_vias");
+if (!JSON.stringify(pcbViaTool?.inputSchema).includes("holeDiameter")) throw new Error("PCB vias must require explicit dimensions");
 
 // 发布构建可只验证工具契约，不要求 EasyEDA 此时已经加载最新版扩展。
 if (process.argv.includes("--tools-only")) {

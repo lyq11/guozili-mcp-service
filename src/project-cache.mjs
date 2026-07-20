@@ -92,6 +92,7 @@ function componentRecord(pageUuid, pageName, component) {
     supplier: attributes.Supplier || null,
     supplierPart: attributes["Supplier Part"] || null,
     footprint: attributes.Footprint || null,
+    nets: [...new Set((component.pins || []).map((pin) => pin.net).filter(Boolean))],
     equivalent,
   };
 }
@@ -292,6 +293,11 @@ export class ProjectCache {
       duplicateGroupCount: items.filter((item) => item.count > 1).length,
       groups: items,
     };
+  }
+
+  async getComponents() {
+    if (!this.catalog) await this.initialize();
+    return this.components.map((component) => ({ ...component }));
   }
 
   async rebuildCatalog() {

@@ -1,6 +1,6 @@
 {
   "name": "guozili-mcp-service-extension",
-  "version": "0.2.13",
+  "version": "0.3.0",
   "private": true,
   "description": "果子狸MCP服务的嘉立创EDA专业版扩展",
   "license": "Apache-2.0",
