@@ -211,6 +211,15 @@ function serializePcbArc(arc: any): JsonObject {
   };
 }
 
+async function serializePcbPolyline(polyline: any): Promise<JsonObject> {
+  const id = polyline.getState_PrimitiveId();
+  return {
+    id, net: polyline.getState_Net() || '', layer: polyline.getState_Layer(),
+    polygon: polygonSource(polyline.getState_Polygon()), width: polyline.getState_LineWidth(),
+    locked: polyline.getState_PrimitiveLock(), bbox: await primitiveBBox(id),
+  };
+}
+
 function serializePcbVia(via: any): JsonObject {
   return {
     id: via.getState_PrimitiveId(), net: via.getState_Net() || '', x: via.getState_X(), y: via.getState_Y(),
@@ -232,12 +241,13 @@ function serializePcbPour(pour: any): JsonObject {
 async function inspectPcb(params: JsonObject): Promise<unknown> {
   const pcbUuid = stringParam(params, 'pcbUuid');
   const board = await openPcb(pcbUuid);
-  const [layers, components, nets, lines, arcs, vias, pours, poured, regions, ruleName, ruleConfiguration, netRules, netByNetRules, regionRules, stackingName] = await Promise.all([
+  const [layers, components, nets, lines, arcs, polylines, vias, pours, poured, regions, ruleName, ruleConfiguration, netRules, netByNetRules, regionRules, stackingName] = await Promise.all([
     eda.pcb_Layer.getAllLayers(),
     eda.pcb_PrimitiveComponent.getAll(),
     eda.pcb_Net.getAllNets(),
     eda.pcb_PrimitiveLine.getAll(),
     eda.pcb_PrimitiveArc.getAll(),
+    eda.pcb_PrimitivePolyline.getAll(),
     eda.pcb_PrimitiveVia.getAll(),
     eda.pcb_PrimitivePour.getAll(),
     eda.pcb_PrimitivePoured.getAll(),
@@ -251,6 +261,8 @@ async function inspectPcb(params: JsonObject): Promise<unknown> {
   ]);
   const serializedLines = lines.map(serializePcbLine);
   const serializedArcs = arcs.map(serializePcbArc);
+  const serializedPolylines = await Promise.all(polylines.map(serializePcbPolyline));
+  const copperLayerIds = new Set(layers.filter(item => item.type === 'SIGNAL' || item.type === 'PLANE').map(item => Number(item.id)));
   return {
     board: boardSummary(board),
     unit: 'mil',
@@ -258,8 +270,9 @@ async function inspectPcb(params: JsonObject): Promise<unknown> {
     stacking: { name: stackingName, configuration: eda.pcb_Layer.getCurrentPhysicalStackingConfiguration() },
     components: await Promise.all(components.map(serializePcbComponent)),
     nets,
-    tracks: serializedLines.filter(line => Number(line.layer) !== 11),
-    trackArcs: serializedArcs.filter(arc => Number(arc.layer) !== 11),
+    tracks: serializedLines.filter(line => copperLayerIds.has(Number(line.layer))),
+    trackArcs: serializedArcs.filter(arc => copperLayerIds.has(Number(arc.layer))),
+    trackPolylines: serializedPolylines.filter(polyline => copperLayerIds.has(Number(polyline.layer))),
     vias: vias.map(serializePcbVia),
     pours: pours.map(serializePcbPour),
     poured: poured.map(item => ({
@@ -275,6 +288,7 @@ async function inspectPcb(params: JsonObject): Promise<unknown> {
     boardOutline: {
       lines: serializedLines.filter(line => Number(line.layer) === 11),
       arcs: serializedArcs.filter(arc => Number(arc.layer) === 11),
+      polylines: serializedPolylines.filter(polyline => Number(polyline.layer) === 11),
     },
     rules: { name: ruleName, configuration: ruleConfiguration, netRules, netByNetRules, regionRules },
   };
@@ -285,13 +299,16 @@ async function inspectPcbRegion(params: JsonObject): Promise<unknown> {
   await openPcb(pcbUuid);
   const left = Number(params.left); const right = Number(params.right);
   const top = Number(params.top); const bottom = Number(params.bottom);
-  if (![left, right, top, bottom].every(Number.isFinite) || left > right || bottom > top) throw new Error('Invalid PCB region bounds');
-  const primitives = await eda.pcb_Document.getPrimitivesInRegion(left, right, top, bottom, params.fullyContained === true);
+  if (![left, right, top, bottom].every(Number.isFinite) || left > right || top === bottom) throw new Error('Invalid PCB region bounds');
+  const normalizedTop = Math.min(top, bottom);
+  const normalizedBottom = Math.max(top, bottom);
+  // EasyEDA's PCB API names the larger Y coordinate `top`; normalize the public result to minY/maxY.
+  const primitives = await eda.pcb_Document.getPrimitivesInRegion(left, right, normalizedBottom, normalizedTop, params.fullyContained === true);
   const items = await Promise.all(primitives.map(async primitive => ({
     id: primitive.getState_PrimitiveId(), type: primitive.getState_PrimitiveType(),
     bbox: await primitiveBBox(primitive.getState_PrimitiveId()),
   })));
-  return { pcbUuid, unit: 'mil', region: { left, right, top, bottom }, primitives: items };
+  return { pcbUuid, unit: 'mil', region: { left, right, top: normalizedTop, bottom: normalizedBottom }, primitives: items };
 }
 
 async function runPcbDrc(params: JsonObject): Promise<unknown> {

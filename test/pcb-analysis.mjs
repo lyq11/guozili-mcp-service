@@ -20,6 +20,8 @@ const snapshot = {
 };
 
 assert.deepEqual(boardBounds(snapshot), { left: 0, right: 100, top: 0, bottom: 100, approximate: false });
+assert.deepEqual(boardBounds({ boardOutline: { lines: [], arcs: [], polylines: [{ bbox: { minX: -10, minY: -20, maxX: 90, maxY: 80 } }] } }),
+  { left: -10, right: 90, top: -20, bottom: 80, approximate: true });
 assert.equal(findComponentOverlaps(snapshot).length, 1);
 assert.deepEqual(findOutsideComponents(snapshot).components.map((item) => item.designator), ["C1"]);
 const unrouted = findUnroutedNets(snapshot);

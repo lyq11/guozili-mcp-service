@@ -94,7 +94,7 @@ export class PcbCache {
       componentCount: snapshot?.components?.length || 0,
       padCount: snapshot?.components?.reduce((sum, item) => sum + (item.pads?.length || 0), 0) || 0,
       netCount: snapshot?.nets?.length || 0,
-      trackCount: (snapshot?.tracks?.length || 0) + (snapshot?.trackArcs?.length || 0),
+      trackCount: (snapshot?.tracks?.length || 0) + (snapshot?.trackArcs?.length || 0) + (snapshot?.trackPolylines?.length || 0),
       viaCount: snapshot?.vias?.length || 0,
       pourCount: snapshot?.pours?.length || 0,
       ttlMs: this.ttlMs,

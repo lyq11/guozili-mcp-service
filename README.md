@@ -101,7 +101,7 @@ npm run build
 生成的扩展包位于：
 
 ```text
-easyeda-extension/dist/guozili-mcp-service_v0.3.0.eext
+easyeda-extension/dist/guozili-mcp-service_v0.3.1.eext
 ```
 
 扩展安装并打开原理图后，可在仓库根目录执行联机冒烟测试：

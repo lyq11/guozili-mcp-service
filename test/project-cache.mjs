@@ -84,4 +84,30 @@ await scoped.initialize();
 assert.equal(scoped.status().pageCount, 1, "only the active schematic should be cached");
 assert.equal(scoped.status().scope.schematicUuid, "backup", "the [main] tag should override the active schematic");
 assert.ok(await scoped.getPage("backup-page"));
+
+const noFocusCalls = [];
+const noFocusBridge = {
+  async call(method, params = {}) {
+    if (method === "system.health") return { project: { uuid: "p" }, schematic: null, page: null };
+    if (method === "schematic.listPages") return { schematics: [
+      { uuid: "main", name: "production [main]", pages: [{ uuid: "main-page" }] },
+      { uuid: "backup-1", name: "production [backup]", pages: [{ uuid: "backup-page-1" }] },
+      { uuid: "backup-2", name: "production [backup]", pages: [{ uuid: "backup-page-2" }] },
+    ], pages: [
+      { uuid: "main-page", schematicUuid: "main" },
+      { uuid: "backup-page-1", schematicUuid: "backup-1" },
+      { uuid: "backup-page-2", schematicUuid: "backup-2" },
+    ] };
+    if (method === "schematic.inspectPage") {
+      noFocusCalls.push(params.pageUuid);
+      return { page: { uuid: params.pageUuid }, components: [], wires: [] };
+    }
+    throw new Error(`Unexpected call: ${method}`);
+  },
+};
+const noFocus = new ProjectCache(noFocusBridge, { ttlMs: 60_000 });
+await noFocus.initialize();
+assert.deepEqual(noFocusCalls, ["main-page"], "startup without a focused schematic must still cache only [main]");
+assert.equal(noFocus.status().pageCount, 1);
+assert.equal(noFocus.status().scope.schematicUuid, "main");
 console.log("Project cache tests passed");

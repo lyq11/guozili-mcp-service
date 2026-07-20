@@ -172,7 +172,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.5.0" },
+  { name: "guozili-mcp-service", version: "0.5.1" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",

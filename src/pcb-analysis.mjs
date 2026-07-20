@@ -20,12 +20,14 @@ export function boardBounds(snapshot) {
   for (const item of [...(snapshot?.boardOutline?.lines || []), ...(snapshot?.boardOutline?.arcs || [])]) {
     points.push([Number(item.startX), Number(item.startY)], [Number(item.endX), Number(item.endY)]);
   }
+  const polylineBoxes = (snapshot?.boardOutline?.polylines || []).map(bboxOf).filter(Boolean);
+  for (const box of polylineBoxes) points.push([box.left, box.top], [box.right, box.bottom]);
   const valid = points.filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
   if (!valid.length) return null;
   return {
     left: Math.min(...valid.map(([x]) => x)), right: Math.max(...valid.map(([x]) => x)),
     top: Math.min(...valid.map(([, y]) => y)), bottom: Math.max(...valid.map(([, y]) => y)),
-    approximate: (snapshot?.boardOutline?.arcs?.length || 0) > 0,
+    approximate: (snapshot?.boardOutline?.arcs?.length || 0) > 0 || polylineBoxes.length > 0,
   };
 }
 
@@ -56,7 +58,7 @@ export function findOutsideComponents(snapshot, { margin = 0 } = {}) {
       || box.top < board.top - margin || box.bottom > board.bottom + margin;
     return outside ? [{ id: component.id, designator: component.designator, layer: component.layer, bbox: component.bbox }] : [];
   });
-  return { boardBounds: board, components, reliable: !board.approximate, reason: board.approximate ? "Arc extents are approximated from endpoints" : null };
+  return { boardBounds: board, components, reliable: !board.approximate, reason: board.approximate ? "Board containment uses the outline bounding box; curved or concave edges require visual confirmation" : null };
 }
 
 function distanceToSegment(point, line) {
@@ -105,11 +107,12 @@ export function findUnroutedNets(snapshot, { tolerance = EPSILON } = {}) {
       net, padCount: pads.length, connectedGroups: [...groups.values()],
       hasPours: (snapshot?.pours || []).some((pour) => pour.net === net),
       hasArcTracks: (snapshot?.trackArcs || []).some((arc) => arc.net === net),
+      hasPolylineTracks: (snapshot?.trackPolylines || []).some((polyline) => polyline.net === net),
     });
   }
   return {
     tolerance, unroutedNetCount: results.length, nets: results,
-    caveat: "Connectivity includes pad centers, straight tracks, and vias. Copper pours and arc tracks are reported but not used to prove connectivity.",
+    caveat: "Connectivity includes pad centers, straight tracks, and vias. Copper pours, arc tracks, and polyline tracks are reported but not used to prove connectivity.",
   };
 }
 
@@ -174,7 +177,7 @@ export function inspectWholeBoard(snapshot, options = {}) {
     counts: {
       layers: snapshot?.layers?.length || 0, components: snapshot?.components?.length || 0,
       pads: (snapshot?.components || []).reduce((sum, item) => sum + (item.pads?.length || 0), 0),
-      nets: snapshot?.nets?.length || 0, tracks: (snapshot?.tracks?.length || 0) + (snapshot?.trackArcs?.length || 0),
+      nets: snapshot?.nets?.length || 0, tracks: (snapshot?.tracks?.length || 0) + (snapshot?.trackArcs?.length || 0) + (snapshot?.trackPolylines?.length || 0),
       vias: snapshot?.vias?.length || 0, pours: snapshot?.pours?.length || 0,
     },
     findings: { componentOverlaps: overlaps, outsideBoard: outside, unrouted },

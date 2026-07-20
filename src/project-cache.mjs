@@ -10,7 +10,7 @@ function cloneWithoutWires(page) {
 
 function pageEntries(catalog, context = null) {
   const schematicUuid = context?.schematic?.uuid;
-  if (schematicUuid && Array.isArray(catalog?.schematics)) {
+  if (Array.isArray(catalog?.schematics)) {
     const mains = catalog.schematics.filter((item) => /\[main\]/i.test(String(item.name || "")));
     const schematic = mains.find((item) => item.uuid === schematicUuid) || mains[0]
       || catalog.schematics.find((item) => item.uuid === schematicUuid);
