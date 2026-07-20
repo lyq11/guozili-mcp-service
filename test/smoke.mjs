@@ -18,15 +18,18 @@ const expected = [
   "easyeda_health",
   "schematic_list_pages",
   "schematic_inspect_page",
+  "schematic_get_component_inventory",
   "schematic_inspect_region",
   "schematic_get_page_occupancy",
   "schematic_find_free_regions",
   "component_search",
   "schematic_analyze_readability",
   "schematic_apply_operations",
+  "schematic_rename_schematic",
   "schematic_rename_page",
   "schematic_delete_page",
   "schematic_delete_primitives",
+  "schematic_update_net_labels",
   "schematic_place_components",
   "schematic_move_components",
   "schematic_transform_components",
@@ -63,6 +66,9 @@ if (!JSON.stringify(applyTool?.inputSchema).includes("set_no_connects")) {
 if (!JSON.stringify(applyTool?.inputSchema).includes("set_component_attribute")) {
   throw new Error("Missing set_component_attribute operation schema");
 }
+if (!JSON.stringify(applyTool?.inputSchema).includes("set_net_label")) {
+  throw new Error("Missing set_net_label operation schema");
+}
 const moveTool = tools.tools.find((tool) => tool.name === "schematic_move_components");
 if (!JSON.stringify(moveTool?.inputSchema).includes("movements")) {
   throw new Error("Invalid schematic_move_components input schema");
@@ -83,6 +89,11 @@ if (!JSON.stringify(noConnectTool?.inputSchema).includes("pinNumbers")) {
 const attributeTool = tools.tools.find((tool) => tool.name === "schematic_set_component_attributes");
 if (!JSON.stringify(attributeTool?.inputSchema).includes("valueVisible")) {
   throw new Error("Invalid schematic_set_component_attributes input schema");
+}
+const netLabelTool = tools.tools.find((tool) => tool.name === "schematic_update_net_labels");
+const netLabelSchema = JSON.stringify(netLabelTool?.inputSchema);
+if (!netLabelSchema.includes("labelId") || !netLabelSchema.includes("net")) {
+  throw new Error("Invalid schematic_update_net_labels input schema");
 }
 const occupancyTool = tools.tools.find((tool) => tool.name === "schematic_get_page_occupancy");
 if (!JSON.stringify(occupancyTool?.inputSchema).includes("cellSize")) {

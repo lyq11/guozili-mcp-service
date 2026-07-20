@@ -5,6 +5,7 @@ type JsonObject = Record<string, unknown>;
 interface BackupRecord {
   schematicUuid: string;
   backupUuid: string;
+  backupName: string;
 }
 
 // 键为“会话 ID + 原理图 UUID”。同一对话操作同一原理图时只会创建一次完整备份。
@@ -187,8 +188,24 @@ async function inspectPage(params: JsonObject): Promise<unknown> {
   const wires = params.includeWires === false ? [] : (await eda.sch_PrimitiveWire.getAll()).map(wire => ({
     id: wire.getState_PrimitiveId(), net: wire.getState_Net(), line: wire.getState_Line(),
   }));
+  // Network labels are page-level attribute primitives, not components or free text.
+  // Returning them explicitly lets callers diagnose and repair labels that merely sit near a wire.
+  const netLabels = (await eda.sch_PrimitiveAttribute.getAll() || [])
+    .filter(attribute => String(attribute.getState_PrimitiveType()).toLocaleLowerCase() === 'netlabel')
+    .map(attribute => ({
+      id: attribute.getState_PrimitiveId(),
+      type: attribute.getState_PrimitiveType(),
+      parentPrimitiveId: attribute.getState_ParentPrimitiveId(),
+      key: attribute.getState_Key(),
+      net: attribute.getState_Value(),
+      keyVisible: attribute.getState_KeyVisible(),
+      valueVisible: attribute.getState_ValueVisible(),
+      x: attribute.getState_X(),
+      y: attribute.getState_Y(),
+      rotation: attribute.getState_Rotation(),
+    }));
   if (!page) throw new Error('No active schematic page');
-  return { page: { uuid: page.uuid, name: page.name }, components: result, wires };
+  return { page: { uuid: page.uuid, name: page.name }, components: result, netLabels, wires };
 }
 
 /** 搜索器件库，并只返回后续创建器件所需的稳定 UUID 与采购元数据。 */
@@ -214,6 +231,8 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
   const operations = operationsParam(params);
   // 工程级读取不依赖当前焦点图页，因此关闭所有图页后仍可以校验目标 pageUuid。
   const pages = await eda.dmt_Schematic.getAllSchematicPagesInfo();
+  const schematics = await eda.dmt_Schematic.getAllSchematicsInfo();
+  const schematicIds = new Set(schematics.map(schematic => schematic.uuid));
   const pageIds = new Set(pages.map(page => page.uuid));
   const pageToSchematic = new Map(pages.map(page => [page.uuid, page.parentSchematicUuid]));
   const affectedSchematicIds = new Set<string>();
@@ -223,6 +242,10 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
     const type = String(operation.type || '');
     const pageUuid = String(operation.pageUuid || '');
     if (!ALLOWED_OPERATIONS.has(type)) { findings.push({ index, level: 'error', message: 'Unsupported operation', type }); continue; }
+    if (type === 'rename_schematic' && !schematicIds.has(String(operation.schematicUuid || ''))) {
+      findings.push({ index, level: 'error', message: 'Schematic does not exist', schematicUuid: operation.schematicUuid });
+      continue;
+    }
     if (pageUuid && !pageIds.has(pageUuid)) { findings.push({ index, level: 'error', message: 'Schematic page does not exist', pageUuid }); continue; }
     if (pageUuid) affectedSchematicIds.add(String(pageToSchematic.get(pageUuid)));
     if (type === 'delete_page') {
@@ -232,7 +255,8 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
     }
     // 只有引用现有图元的操作需要打开页面并核对 ID。
     if (type === 'delete_primitives' || type === 'connect_pins' || type === 'move_component' || type === 'transform_components'
-      || type === 'translate_group' || type === 'set_no_connects' || type === 'set_component_attribute' || type === 'create_port_with_wire') {
+      || type === 'translate_group' || type === 'set_no_connects' || type === 'set_component_attribute' || type === 'set_net_label'
+      || type === 'create_port_with_wire') {
       await openPage(pageUuid);
       const componentIds = new Set(await eda.sch_PrimitiveComponent.getAllPrimitiveId());
       const wireIds = new Set(await eda.sch_PrimitiveWire.getAllPrimitiveId());
@@ -332,6 +356,25 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
         const attribute = attributes.find(item => item.getState_ParentPrimitiveId() === componentId
           && item.getState_Key().toLocaleLowerCase() === key.toLocaleLowerCase());
         if (!attribute) findings.push({ index, level: 'error', message: `Attribute not found: ${key}`, id: componentId });
+      } else if (type === 'set_net_label') {
+        const labelId = String(operation.labelId || '');
+        const label = await eda.sch_PrimitiveAttribute.get(labelId);
+        if (!label || Array.isArray(label)
+          || String(label.getState_PrimitiveType()).toLocaleLowerCase() !== 'netlabel') {
+          findings.push({ index, level: 'error', message: 'Native net label not found', id: labelId });
+          continue;
+        }
+        const hasChange = operation.x !== undefined || operation.y !== undefined || operation.net !== undefined;
+        if (!hasChange) findings.push({ index, level: 'error', message: 'set_net_label requires x, y, or net', id: labelId });
+        if (operation.x !== undefined && (typeof operation.x !== 'number' || !Number.isFinite(operation.x))) {
+          findings.push({ index, level: 'error', message: 'x must be a finite number', id: labelId });
+        }
+        if (operation.y !== undefined && (typeof operation.y !== 'number' || !Number.isFinite(operation.y))) {
+          findings.push({ index, level: 'error', message: 'y must be a finite number', id: labelId });
+        }
+        if (operation.net !== undefined && (typeof operation.net !== 'string' || !operation.net)) {
+          findings.push({ index, level: 'error', message: 'net must be a non-empty string', id: labelId });
+        }
       } else if (type === 'create_port_with_wire') {
         const sourceComponentId = String(operation.sourceComponentId || '');
         if (!componentIds.has(sourceComponentId)) {
@@ -357,8 +400,9 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
 
 // 插件最终允许执行的写操作集合；即使绕过 MCP Schema，也不能调用集合外方法。
 const ALLOWED_OPERATIONS = new Set([
+  'rename_schematic',
   'rename_page', 'delete_page', 'delete_primitives', 'create_component', 'move_component', 'transform_components', 'translate_group', 'create_wire',
-  'connect_pins', 'create_net_port', 'create_port_with_wire', 'create_net_flag', 'set_no_connects', 'set_component_attribute', 'create_text',
+  'connect_pins', 'create_net_port', 'create_port_with_wire', 'create_net_flag', 'set_no_connects', 'set_component_attribute', 'set_net_label', 'create_text',
 ]);
 
 /** 根据器件 ID 和引脚号解析绝对坐标，供 connect_pins 自动生成折线。 */
@@ -423,7 +467,13 @@ async function ensureSessionBackup(sessionId: string, schematicUuid: string): Pr
   const pending = (async (): Promise<BackupRecord> => {
     const backupUuid = await eda.dmt_Schematic.copySchematic(schematicUuid);
     if (!backupUuid) throw new Error('Unable to create session schematic backup; write aborted');
-    return { schematicUuid, backupUuid };
+    const schematics = await eda.dmt_Schematic.getAllSchematicsInfo();
+    const copied = schematics.find(item => item.uuid === backupUuid);
+    const generatedName = String(copied?.name || `schematic_${backupUuid.slice(0, 8)}`);
+    const backupName = `${generatedName.replace(/\[(?:main|backup)\]/gi, '').replace(/\s+_/g, '_').trim()} [backup]`;
+    const renamed = await eda.dmt_Schematic.modifySchematicName(backupUuid, backupName);
+    if (!renamed) throw new Error(`Session backup was created but could not be tagged [backup]: ${backupUuid}`);
+    return { schematicUuid, backupUuid, backupName };
   })();
   sessionBackups.set(key, pending);
 
@@ -469,6 +519,7 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
     if (pageUuid) await openPage(pageUuid);
     let value: unknown;
     switch (type) {
+      case 'rename_schematic': value = await eda.dmt_Schematic.modifySchematicName(String(operation.schematicUuid), String(operation.name)); break;
       case 'rename_page': value = await eda.dmt_Schematic.modifySchematicPageName(pageUuid, String(operation.name)); break;
       case 'delete_page': value = await eda.dmt_Schematic.deleteSchematicPage(pageUuid); break;
       case 'delete_primitives': {
@@ -739,6 +790,35 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
         };
         break;
       }
+      case 'set_net_label': {
+        const labelId = String(operation.labelId);
+        const existing = await eda.sch_PrimitiveAttribute.get(labelId);
+        if (!existing || Array.isArray(existing)
+          || String(existing.getState_PrimitiveType()).toLocaleLowerCase() !== 'netlabel') {
+          throw new Error(`Native net label not found: ${labelId}`);
+        }
+        const before = {
+          net: existing.getState_Value(),
+          x: existing.getState_X(),
+          y: existing.getState_Y(),
+        };
+        const property: {x?: number; y?: number; value?: string} = {};
+        if (operation.x !== undefined) property.x = Number(operation.x);
+        if (operation.y !== undefined) property.y = Number(operation.y);
+        if (operation.net !== undefined) property.value = String(operation.net);
+        const modified = await eda.sch_PrimitiveAttribute.modify(existing, property);
+        if (!modified) throw new Error(`Net label update failed: ${labelId}`);
+        value = {
+          labelId,
+          before,
+          after: {
+            net: modified.getState_Value(),
+            x: modified.getState_X(),
+            y: modified.getState_Y(),
+          },
+        };
+        break;
+      }
       case 'create_text': {
         // 文本只承担人类可读标注，不影响电气网络。
         const text = await eda.sch_PrimitiveText.create(
@@ -759,6 +839,7 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
     success: true,
     schematicUuid: schematic.uuid,
     backupUuid: backup.backupUuid,
+    backupName: backup.backupName,
     backupCreated: backup.created,
     results,
   };

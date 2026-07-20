@@ -41,6 +41,8 @@ export class EasyEdaRpcServer {
     this.pending = new Map();
     this.startPromise = null;
     this.debug = process.env.EASYEDA_MCP_DEBUG === "1";
+    this.registrationListeners = new Set();
+    this.disconnectionListeners = new Set();
   }
 
   /** 仅在 EASYEDA_MCP_DEBUG=1 时向 stderr 输出诊断信息，避免污染 MCP stdout。 */
@@ -135,6 +137,10 @@ export class EasyEdaRpcServer {
         this.windows.set(connection.windowId, { socket, connection, registeredAt: new Date().toISOString() });
         this.#log("registered", { windowId: connection.windowId, capabilities: connection.capabilities });
         socket.send(JSON.stringify({ type: "registered", windowId: connection.windowId, protocolVersion: PROTOCOL_VERSION }));
+        for (const listener of this.registrationListeners) {
+          Promise.resolve().then(() => listener(connection.windowId)).catch((error) =>
+            this.#log("registration-listener-error", { message: error?.message || String(error) }));
+        }
         return;
       }
 
@@ -157,6 +163,10 @@ export class EasyEdaRpcServer {
       this.#log("closed", { windowId: connection.windowId });
       clearTimeout(authTimer);
       if (connection.windowId) this.windows.delete(connection.windowId);
+      for (const listener of this.disconnectionListeners) {
+        try { listener(connection.windowId); }
+        catch (error) { this.#log("disconnection-listener-error", { message: error?.message || String(error) }); }
+      }
       // 连接断开后立即拒绝该窗口上的所有待处理请求，避免只能等超时。
       for (const [id, request] of this.pending) {
         if (request.socket !== socket) continue;
@@ -165,6 +175,16 @@ export class EasyEdaRpcServer {
         this.pending.delete(id);
       }
     });
+  }
+
+  onRegistration(listener) {
+    this.registrationListeners.add(listener);
+    return () => this.registrationListeners.delete(listener);
+  }
+
+  onDisconnection(listener) {
+    this.disconnectionListeners.add(listener);
+    return () => this.disconnectionListeners.delete(listener);
   }
 
   /** 等待至少一个插件窗口注册；当前实现是一次定时等待，不做高频轮询。 */

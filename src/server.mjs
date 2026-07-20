@@ -10,11 +10,15 @@ import { summarizeOperations, WriteCoordinator } from "./transactions.mjs";
 import { analyzeReadability } from "./readability.mjs";
 import { annotatePagePinLayouts, planPortForPin } from "./pin-layout.mjs";
 import { OCCUPANCY, PageOccupancyCache } from "./page-occupancy.mjs";
+import { ProjectCache } from "./project-cache.mjs";
 
 // bridge 管理插件连接；writes 提供会话 ID 和写入串行化。
 const bridge = new EasyEdaRpcServer();
 const writes = new WriteCoordinator();
 const pageOccupancy = new PageOccupancyCache();
+const projectCache = new ProjectCache(bridge);
+bridge.onRegistration(() => projectCache.initialize({ force: true }));
+bridge.onDisconnection(() => projectCache.clear());
 // 先占用本地端口，再启动 MCP stdio，插件可以随时连接。
 await bridge.start();
 
@@ -28,6 +32,7 @@ const rotationSchema = z.union([z.literal(0), z.literal(90), z.literal(180), z.l
 
 // 所有写操作必须先通过此白名单 Schema；MCP 不接受任意 EasyEDA JavaScript。
 const operationSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("rename_schematic"), schematicUuid: z.string(), name: z.string().min(1).max(80) }),
   z.object({ type: z.literal("rename_page"), pageUuid: z.string(), name: z.string().min(1).max(80) }),
   z.object({ type: z.literal("delete_page"), pageUuid: z.string() }),
   z.object({
@@ -127,6 +132,17 @@ const operationSchema = z.discriminatedUnion("type", [
     valueVisible: z.boolean().default(true),
   }),
   z.object({
+    type: z.literal("set_net_label"),
+    pageUuid: z.string().min(1),
+    labelId: z.string().min(1),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    net: z.string().min(1).max(200).optional(),
+  }).refine(
+    (change) => change.x !== undefined || change.y !== undefined || change.net !== undefined,
+    "A net-label change must include x, y, or net",
+  ),
+  z.object({
     type: z.literal("create_port_for_pin"),
     pageUuid: z.string(),
     componentId: z.string().min(1),
@@ -150,7 +166,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.4.11" },
+  { name: "guozili-mcp-service", version: "0.4.20" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",
@@ -188,9 +204,10 @@ server.registerTool(
   async () => {
     try {
       // context 来自插件中的当前编辑器状态，connection 来自 MCP 本地网关。
-      const context = await bridge.call("system.health");
+      await projectCache.ensureContext();
+      const context = projectCache.context;
       const connection = await bridge.status();
-      return toolResult({ connection, context });
+      return toolResult({ connection, context, cache: projectCache.status() });
     } catch (error) {
       return toolError(error);
     }
@@ -202,7 +219,7 @@ server.registerTool(
   "schematic_list_pages",
   { description: "List every schematic and page in the open EasyEDA project, even when no page is currently open." },
   async () => {
-    try { return toolResult(await bridge.call("schematic.listPages")); }
+    try { return toolResult(await projectCache.getCatalog()); }
     catch (error) { return toolError(error); }
   },
 );
@@ -211,7 +228,7 @@ server.registerTool(
 server.registerTool(
   "schematic_inspect_page",
   {
-    description: "Read components, pins, positions, nets, and optionally wires from one schematic page.",
+    description: "Read components, pins, positions, native net labels, nets, and optionally wires from one schematic page.",
     inputSchema: {
       pageUuid: z.string().min(1),
       includeWires: z.boolean().default(true),
@@ -219,9 +236,24 @@ server.registerTool(
   },
   async ({ pageUuid, includeWires }) => {
     try {
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires });
+      const page = await projectCache.getPage(pageUuid, { includeWires });
       return toolResult(annotatePagePinLayouts(page));
     }
+    catch (error) { return toolError(error); }
+  },
+);
+
+server.registerTool(
+  "schematic_get_component_inventory",
+  {
+    description: "Read the cached project-wide component inventory, grouped by model identity or sourcing fields, to find normalization candidates and inconsistent attributes.",
+    inputSchema: {
+      groupBy: z.enum(["model", "equivalentSpec", "deviceUuid", "manufacturerPart", "supplierPart", "name"]).default("model"),
+      includeSingletons: z.boolean().default(false),
+    },
+  },
+  async ({ groupBy, includeSingletons }) => {
+    try { return toolResult(await projectCache.getComponentInventory({ groupBy, includeSingletons })); }
     catch (error) { return toolError(error); }
   },
 );
@@ -244,7 +276,7 @@ server.registerTool(
   async ({ pageUuid, left, top, right, bottom, includeComponents, includeWires }) => {
     try {
       if (left > right || top > bottom) throw new Error("Invalid region bounds");
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires });
+      const page = await projectCache.getPage(pageUuid, { includeWires });
       const inside = (x, y) => x >= left && x <= right && y >= top && y <= bottom;
       const components = includeComponents
         ? page.components.filter((component) => inside(component.x, component.y))
@@ -284,7 +316,7 @@ server.registerTool(
   },
   async ({ pageUuid, cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock, includeRows }) => {
     try {
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires: true });
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
       const grid = pageOccupancy.get(pageUuid, page, { cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock });
       return toolResult(grid.describe({ includeRows }));
     } catch (error) {
@@ -315,7 +347,7 @@ server.registerTool(
   },
   async ({ pageUuid, width, height, count, clearance, preferredX, preferredY, cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock }) => {
     try {
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires: true });
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
       const grid = pageOccupancy.get(pageUuid, page, { cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock });
       const regions = grid.findFreeRectangles({ width, height, count, clearance, preferredX, preferredY });
       return toolResult({ page: page.page, grid: grid.describe(), requested: { width, height, count, clearance, preferredX, preferredY }, regions });
@@ -348,7 +380,7 @@ server.registerTool(
   async ({ pageUuid }) => {
     try {
       // 可读性分析运行在 MCP 侧，所以先向插件读取完整页面数据。
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires: true });
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
       return toolResult(analyzeReadability(page));
     } catch (error) {
       return toolError(error);
@@ -419,6 +451,13 @@ async function executeOperations(operations, reason) {
     return toolError(error);
   } finally {
     pageOccupancy.invalidate(affectedPageUuids);
+    const changesCatalog = operations.some((operation) => operation.type === "delete_page" || operation.type === "rename_page" || operation.type === "rename_schematic");
+    try {
+      if (changesCatalog) await projectCache.rebuildCatalog();
+      else await projectCache.refreshPages(affectedPageUuids);
+    } catch {
+      projectCache.clear();
+    }
   }
 }
 
@@ -427,6 +466,13 @@ function registerWriteTool(name, description, inputSchema, buildOperations) {
   server.registerTool(name, { description, inputSchema }, async (args) =>
     executeOperations(buildOperations(args), args.reason));
 }
+
+registerWriteTool(
+  "schematic_rename_schematic",
+  "Rename one schematic document by UUID. This changes the schematic name, not its individual page names.",
+  { schematicUuid: z.string().min(1), name: z.string().min(1).max(80), reason: z.string().min(1).max(500).default("Rename schematic document") },
+  ({ schematicUuid, name }) => [{ type: "rename_schematic", schematicUuid, name }],
+);
 
 registerWriteTool(
   "schematic_rename_page",
@@ -453,6 +499,25 @@ registerWriteTool(
     reason: z.string().min(1).max(500).default("删除原理图图元"),
   },
   ({ pageUuid, componentIds, wireIds, textIds }) => [{ type: "delete_primitives", pageUuid, componentIds, wireIds, textIds }],
+);
+
+registerWriteTool(
+  "schematic_update_net_labels",
+  "Move and/or rename native EasyEDA net labels by primitive ID. Inspect the page first and place each label exactly on its intended wire endpoint or segment.",
+  {
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      labelId: z.string().min(1),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      net: z.string().min(1).max(200).optional(),
+    }).refine(
+      (change) => change.x !== undefined || change.y !== undefined || change.net !== undefined,
+      "Each net-label change must include x, y, or net",
+    )).min(1).max(100),
+    reason: z.string().min(1).max(500).default("Move or rename native net labels"),
+  },
+  ({ pageUuid, changes }) => changes.map((change) => ({ type: "set_net_label", pageUuid, ...change })),
 );
 
 registerWriteTool(
