@@ -1,10 +1,10 @@
 # 果子狸MCP服务工具说明
 
-版本：`0.4.1`
+版本：`0.4.2`
 
 EasyEDA MCP 通过本机 WebSocket RPC 连接 EasyEDA MCP Extension。接口全部采用结构化白名单，不依赖 Run API Gateway，也不执行任意 JavaScript。
 
-当前共有 **18 个 MCP 工具**。日常修改优先使用直接工具，`schematic_apply_operations` 仅作为尚未封装能力的底层入口。
+当前共有 **19 个 MCP 工具**。日常修改优先使用直接工具，`schematic_apply_operations` 仅作为尚未封装能力的底层入口。
 
 ## 工具总览
 
@@ -22,6 +22,7 @@ EasyEDA MCP 通过本机 WebSocket RPC 连接 EasyEDA MCP Extension。接口全�
 | `schematic_delete_primitives` | 写入 | 按 ID 删除器件和导线 |
 | `schematic_place_components` | 写入 | 批量放置器件；应在布线前单独完成 |
 | `schematic_move_components` | 写入 | 按图元 ID 将一个或多个既有普通器件移动到绝对坐标 |
+| `schematic_move_components_with_wires` | 写入 | 以统一偏移量成组平移选定器件和完整导线折线 |
 | `schematic_create_wires` | 写入 | 批量创建直接带网络名的导线，无需先放网络标签 |
 | `schematic_connect_pin_pairs` | 写入 | 按器件 ID 和 PIN 号连接引脚对 |
 | `schematic_create_net_flags` | 写入 | 创建原生电源、地、模拟地或保护地标志 |
@@ -234,6 +235,23 @@ MCP 会根据器件原点和 PIN 的画布绝对坐标补充布局信息：
 ```
 
 直接工具 `schematic_move_components` 的 `movements` 数组可一次提交 1～50 个上述移动目标。`x`、`y` 是器件的新绝对坐标，不是偏移量。调用前应先检查页面获取稳定的图元 ID；该工具只移动普通器件，不移动网络端口或网络标志，也不会主动重画既有导线。
+
+#### translate_group
+
+```json
+{
+  "type": "translate_group",
+  "pageUuid": "图页UUID",
+  "componentIds": ["U1图元ID", "R1图元ID"],
+  "wireIds": ["导线1图元ID", "导线2图元ID"],
+  "deltaX": 80,
+  "deltaY": -20
+}
+```
+
+直接工具名称为 `schematic_move_components_with_wires`。`deltaX`、`deltaY` 是统一偏移量；器件坐标和每条导线的全部端点、拐点都会应用相同偏移，因此组内相对布局保持不变。
+
+工具只移动明确传入的 ID，不自动查找“相连导线”。如果一条导线另一端仍连接未移动器件，不应把整条导线加入 `wireIds`，否则它会与静止器件断开；这种情况应单独修改或重新规划该导线。
 
 #### create_wire
 

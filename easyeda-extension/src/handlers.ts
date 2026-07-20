@@ -163,7 +163,7 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
       if (siblingCount <= 1) findings.push({ index, level: 'error', message: 'Cannot delete the only schematic page' });
     }
     // 只有引用现有图元的操作需要打开页面并核对 ID。
-    if (type === 'delete_primitives' || type === 'connect_pins' || type === 'move_component') {
+    if (type === 'delete_primitives' || type === 'connect_pins' || type === 'move_component' || type === 'translate_group') {
       await openPage(pageUuid);
       const componentIds = new Set(await eda.sch_PrimitiveComponent.getAllPrimitiveId());
       const wireIds = new Set(await eda.sch_PrimitiveWire.getAllPrimitiveId());
@@ -174,8 +174,19 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
         for (const endpoint of [operation.from, operation.to] as JsonObject[]) {
           if (!endpoint || !componentIds.has(String(endpoint.componentId))) findings.push({ index, level: 'error', message: 'Endpoint component not found', id: endpoint?.componentId });
         }
-      } else if (!componentIds.has(String(operation.componentId))) {
+      } else if (type === 'move_component' && !componentIds.has(String(operation.componentId))) {
         findings.push({ index, level: 'error', message: 'Component not found', id: operation.componentId });
+      } else if (type === 'translate_group') {
+        const selectedComponentIds = operation.componentIds as string[] || [];
+        const selectedWireIds = operation.wireIds as string[] || [];
+        if (selectedComponentIds.length === 0 && selectedWireIds.length === 0) {
+          findings.push({ index, level: 'error', message: 'translate_group requires at least one component or wire' });
+        }
+        if (Number(operation.deltaX) === 0 && Number(operation.deltaY) === 0) {
+          findings.push({ index, level: 'error', message: 'translate_group delta cannot be zero' });
+        }
+        for (const id of selectedComponentIds) if (!componentIds.has(id)) findings.push({ index, level: 'error', message: 'Component not found', id });
+        for (const id of selectedWireIds) if (!wireIds.has(id)) findings.push({ index, level: 'error', message: 'Wire not found', id });
       }
     }
   }
@@ -187,7 +198,7 @@ async function validateOperations(params: JsonObject): Promise<unknown> {
 
 // 插件最终允许执行的写操作集合；即使绕过 MCP Schema，也不能调用集合外方法。
 const ALLOWED_OPERATIONS = new Set([
-  'rename_page', 'delete_page', 'delete_primitives', 'create_component', 'move_component', 'create_wire',
+  'rename_page', 'delete_page', 'delete_primitives', 'create_component', 'move_component', 'translate_group', 'create_wire',
   'connect_pins', 'create_net_port', 'create_net_flag', 'create_text',
 ]);
 
@@ -199,6 +210,14 @@ async function getPin(componentId: string, pinNumber: string): Promise<{x: numbe
   const pin = pins.find(item => item.getState_PinNumber() === String(pinNumber));
   if (!pin) throw new Error(`Pin ${pinNumber} not found on component ${componentId}`);
   return { x: pin.getState_X(), y: pin.getState_Y() };
+}
+
+/** 平移导线的一维或分段坐标数组，并保持原有嵌套结构。 */
+function translateWireLine(line: Array<number> | Array<Array<number>>, deltaX: number, deltaY: number): Array<number> | Array<Array<number>> {
+  if (line.length > 0 && Array.isArray(line[0])) {
+    return (line as Array<Array<number>>).map(segment => translateWireLine(segment, deltaX, deltaY) as Array<number>);
+  }
+  return (line as Array<number>).map((coordinate, index) => coordinate + (index % 2 === 0 ? deltaX : deltaY));
 }
 
 /**
@@ -300,6 +319,35 @@ async function applyOperations(params: JsonObject): Promise<unknown> {
           before,
           after: { x: moved.getState_X(), y: moved.getState_Y() },
         };
+        break;
+      }
+      case 'translate_group': {
+        // 整块平移采用统一增量：器件修改坐标，导线所有端点和拐点保持相对形状一起移动。
+        const deltaX = Number(operation.deltaX);
+        const deltaY = Number(operation.deltaY);
+        const movedComponents = [];
+        const movedWires = [];
+        for (const componentId of operation.componentIds as string[] || []) {
+          const component = await eda.sch_PrimitiveComponent.get(componentId);
+          if (!component || Array.isArray(component)) throw new Error(`Component not found: ${componentId}`);
+          const before = { x: component.getState_X(), y: component.getState_Y() };
+          const moved = await eda.sch_PrimitiveComponent.modify(componentId, {
+            x: before.x + deltaX,
+            y: before.y + deltaY,
+          });
+          if (!moved) throw new Error(`Component move failed: ${componentId}`);
+          movedComponents.push({ componentId, before, after: { x: moved.getState_X(), y: moved.getState_Y() } });
+        }
+        for (const wireId of operation.wireIds as string[] || []) {
+          const wire = await eda.sch_PrimitiveWire.get(wireId);
+          if (!wire || Array.isArray(wire)) throw new Error(`Wire not found: ${wireId}`);
+          const before = wire.getState_Line();
+          const after = translateWireLine(before, deltaX, deltaY);
+          const moved = await eda.sch_PrimitiveWire.modify(wireId, { line: after });
+          if (!moved) throw new Error(`Wire move failed: ${wireId}`);
+          movedWires.push({ wireId, before, after: moved.getState_Line() });
+        }
+        value = { deltaX, deltaY, components: movedComponents, wires: movedWires };
         break;
       }
       case 'create_wire': {

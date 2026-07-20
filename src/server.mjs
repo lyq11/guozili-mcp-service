@@ -54,6 +54,14 @@ const operationSchema = z.discriminatedUnion("type", [
     y: z.number(),
   }),
   z.object({
+    type: z.literal("translate_group"),
+    pageUuid: z.string().min(1),
+    componentIds: z.array(z.string().min(1)).max(50).default([]),
+    wireIds: z.array(z.string().min(1)).max(100).default([]),
+    deltaX: z.number(),
+    deltaY: z.number(),
+  }),
+  z.object({
     type: z.literal("create_wire"),
     pageUuid: z.string(),
     line: z.array(z.number()).min(4).refine((line) => line.length % 2 === 0, "line must contain x/y pairs"),
@@ -109,7 +117,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.4.1" },
+  { name: "guozili-mcp-service", version: "0.4.2" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",
@@ -376,6 +384,24 @@ registerWriteTool(
     reason: z.string().min(1).max(500).default("移动既有原理图器件"),
   },
   ({ pageUuid, movements }) => movements.map((movement) => ({ type: "move_component", pageUuid, ...movement })),
+);
+
+registerWriteTool(
+  "schematic_move_components_with_wires",
+  "Translate selected existing part components and complete wire polylines together by one delta. Only explicitly listed wires are moved.",
+  {
+    pageUuid: z.string().min(1),
+    componentIds: z.array(z.string().min(1)).max(50).default([]),
+    wireIds: z.array(z.string().min(1)).max(100).default([]),
+    deltaX: z.number(),
+    deltaY: z.number(),
+    reason: z.string().min(1).max(500).default("成组移动既有器件和导线"),
+  },
+  ({ pageUuid, componentIds, wireIds, deltaX, deltaY }) => {
+    if (componentIds.length === 0 && wireIds.length === 0) throw new Error("At least one componentId or wireId is required");
+    if (deltaX === 0 && deltaY === 0) throw new Error("deltaX and deltaY cannot both be zero");
+    return [{ type: "translate_group", pageUuid, componentIds, wireIds, deltaX, deltaY }];
+  },
 );
 
 registerWriteTool(
