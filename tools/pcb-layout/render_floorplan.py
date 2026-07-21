@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Render a snapshot + changes.json (+ optional report.json) as an SVG floor
-plan: board outline, every component as a labeled rectangle at its FINAL
-position (changes.json position if it moved, original position otherwise),
-color-coded by region so you can see what this run actually did before
-deciding what to change.
+"""把快照 + changes.json(可选再加 report.json)渲染成一张 SVG 平面图:
+板框轮廓,每个器件用一个带标签的矩形画在它的**最终**位置(移动过的用
+changes.json 里的位置,没动过的用原始位置),按区域上色,方便你在决定
+怎么改之前先看清楚这次跑出来的到底是什么样子。
 """
 
 from __future__ import annotations
@@ -16,9 +15,9 @@ import model as m
 VIEWBOX_WIDTH = 680.0
 MARGIN = 40.0
 
-# Cycled across regions so adjacent anchors are visually distinguishable --
-# a floor plan needs more categorical separation than a typical flowchart,
-# where the 2-3 color guidance assumes far fewer simultaneous categories.
+# 在各个区域之间循环使用,让相邻的锚点在视觉上能区分开——平面图需要比
+# 一般流程图更多的分类色,流程图那种"2-3 种颜色"的建议是假设同时出现
+# 的分类数量少得多。
 REGION_RAMPS = ["c-blue", "c-teal", "c-purple", "c-coral", "c-pink", "c-amber", "c-green"]
 LOCKED_RAMP = "c-gray"
 UNASSIGNED_RAMP = "c-gray"
@@ -26,9 +25,9 @@ PROBLEM_RAMP = "c-red"
 
 
 def build_final_state(snapshot: dict, changes: list[dict]) -> dict[str, dict]:
-    """componentId -> {x, y, rotation, bbox} at its FINAL position, recomputing
-    the bbox with the same rotate-corners-around-original-position approach
-    place.py itself uses (changes.json only carries x/y/rotation, not bbox)."""
+    """算出每个器件 id 对应的{x, y, rotation, bbox}最终状态,bbox 用跟
+    place.py 自己一样的"绕原始位置旋转角点"方式重新算(changes.json 只
+    带 x/y/rotation,不带 bbox)。"""
     final: dict[str, dict] = {}
     changes_by_id = {c["componentId"]: c for c in changes}
     for component in snapshot.get("components", []):
@@ -52,6 +51,7 @@ def build_final_state(snapshot: dict, changes: list[dict]) -> dict[str, dict]:
 
 
 def esc(text: str) -> str:
+    """转义 XML 特殊字符,防止破坏 SVG 结构。"""
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -59,6 +59,7 @@ LEGEND_HEIGHT = 34.0
 
 
 def render(snapshot: dict, regions_json: dict, changes: list[dict], report: dict | None) -> str:
+    """渲染出完整的 SVG 字符串。"""
     final_state = build_final_state(snapshot, changes)
     board_bounds = regions_json["board"]["bounds"]
     board_w = board_bounds["maxX"] - board_bounds["minX"]
@@ -98,7 +99,7 @@ def render(snapshot: dict, regions_json: dict, changes: list[dict], report: dict
         f'<desc>Board outline with every component at its proposed position, color-coded by region.</desc>'
     )
 
-    # Board outline (outer ring, holes cut out via evenodd fill rule).
+    # 板框轮廓(外圈,孔洞用 evenodd 填充规则挖空)。
     outer = regions_json["board"]["polygon"]["outer"]
     holes = regions_json["board"]["polygon"]["holes"]
     if outer:
@@ -107,8 +108,7 @@ def render(snapshot: dict, regions_json: dict, changes: list[dict], report: dict
             path += " M " + " L ".join(f"{sx(p[0]):.1f} {sy(p[1]):.1f}" for p in hole) + " Z"
         parts.append(f'<path d="{path}" fill-rule="evenodd" class="c-gray" fill-opacity="0.15" stroke-width="1.5"/>')
 
-    # Keepout discs (anchor-clearance keepouts only -- polygon-sourced EDA
-    # keepouts aren't decoded, see plan limitations).
+    # 禁布区圆盘(只画锚点间距圆盘——EDA 原生多边形禁布区没有解码,见计划里的限制说明)。
     for keepout in regions_json.get("keepouts", []):
         if keepout.get("source") == "anchor-clearance":
             cx, cy = keepout["center"]
@@ -117,6 +117,7 @@ def render(snapshot: dict, regions_json: dict, changes: list[dict], report: dict
                          f'stroke-width="1" stroke-dasharray="4 3" opacity="0.6"/>')
 
     def draw_component(cid: str, component: dict, ramp: str, label_extra: str = "") -> None:
+        """画一个器件的矩形和标签。"""
         state = final_state.get(cid)
         if not state:
             return
@@ -187,7 +188,7 @@ def main() -> None:
     svg = render(snapshot, regions_json, changes, report)
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(svg)
-    print(f"Wrote {args.out}")
+    print(f"已写入 {args.out}")
 
 
 if __name__ == "__main__":

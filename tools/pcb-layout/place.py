@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Stage C: rule-based intra-region placement + macro packing, driven by
-region-params.json. Emits changes.json (proposed new positions) and
-report.json (validation results) -- report.json must be inspected (or run
-through apply_gate.py) before changes.json is ever treated as apply-ready.
+"""Stage C:基于规则的区域内布局 + 宏观打包,由 region-params.json 驱动。
+输出 changes.json(建议的新坐标)和 report.json(校验结果)——changes.json
+在被当成"可以应用"之前,必须先看一遍 report.json(或者跑一遍 apply_gate.py)。
 """
 
 from __future__ import annotations
@@ -18,29 +17,29 @@ import model as m
 DEFAULT_CLEARANCE_MIL = 10.0
 DEFAULT_WIRELENGTH_NET_USAGE_THRESHOLD = 15
 WIRELENGTH_REGRESSION_BUDGET = 1.05
-# Used for any component with a structural pin target that no rule matched
-# -- a rule only narrows this (e.g. a tighter maxDistanceMil for a specific
-# decoupling cap value), it doesn't gate whether near-pin placement happens.
+# 给任何有结构化引脚目标、但没有规则命中的器件用——规则只是收窄这个默认值
+# (比如给某个具体的去耦电容值设更紧的 maxDistanceMil),不是决定要不要
+# 走近引脚放置。
 DEFAULT_NEAR_PIN_MAX_DISTANCE_MIL = 200.0
 
-# Set from --debug in main(). When True: (1) placement decisions are traced
-# to stderr, and (2) a component/region that exhausts its retry budget is
-# force-placed at the best candidate found instead of being left untouched
-# -- this trades correctness for always producing a complete changes.json,
-# specifically so the result can be rendered and visually inspected even
-# when the heuristic can't fully solve the board. Every forced placement is
-# still recorded in report.json (`forcedPlacements`), and the gate does not
-# treat --debug output as apply-ready any more leniently than a normal run.
+# 由 main() 里的 --debug 设置。为 True 时:(1) 布局决策会 trace 到
+# stderr;(2) 一个器件/区域如果用完了重试预算,会强行塞到目前找到的最好
+# 候选位置,而不是原地不动——这是用"正确性"换"changes.json 总是完整的,
+# 方便渲染查看",哪怕启发式算法解不出一块干净的板子也一样。每个强行放置
+# 的都会记进 report.json 的 `forcedPlacements`,门禁不会因为是 --debug
+# 产生的结果就放宽标准。
 DEBUG = False
 
 
 def debug_log(*parts: object) -> None:
+    """只在 --debug 打开时,把诊断信息打到 stderr。"""
     if DEBUG:
         print("[debug]", *parts, file=sys.stderr)
 
 
 @dataclass
 class PlacedComponent:
+    """布局过程中一个器件的可变状态。"""
     id: str
     designator: str
     x: float
@@ -49,27 +48,27 @@ class PlacedComponent:
     bbox: dict
     locked: bool
     moved: bool = False
-    # A member that couldn't be intra-region placed within its retry budget
-    # stays at its original position, exactly like a locked component --
-    # crucially it must NOT be swept up in its region's later rigid-body
-    # transform, or it would silently jump from wherever it originally was
-    # to a new rotated/translated spot despite never having been placed.
+    # 一个在重试预算内没能完成区域内布局的成员,会留在原地,跟锁定器件
+    # 一样——但关键是它绝不能被后续区域的刚体变换一起搬走,不然它会从
+    # 原来的位置莫名其妙跳到一个旋转/平移之后的新位置,尽管它从来没被
+    # 真正放置过。
     unplaceable: bool = False
-    # True when --debug forced this component into a position that still
-    # collides with something -- always cross-checked with the report's
-    # final overlap pass, never silently hidden.
+    # --debug 把这个器件强行塞到一个仍然冲突的位置时为 True——一定会
+    # 跟 report 最后那一遍重叠检查交叉核对,不会被悄悄藏起来。
     forced: bool = False
 
 
 @dataclass
 class PlacementState:
+    """整个布局过程的全局状态:所有器件、障碍物列表、禁布区、板框。"""
     components: dict[str, PlacedComponent]
-    obstacles: list[dict] = field(default_factory=list)  # bboxes, grows as things get placed
+    obstacles: list[dict] = field(default_factory=list)  # bbox 列表,随着器件被放置不断增长
     disc_keepouts: list[tuple[tuple[float, float], float]] = field(default_factory=list)
     board: geo.BoardPolygon = field(default_factory=geo.BoardPolygon)
     clearance: float = DEFAULT_CLEARANCE_MIL
 
     def collides(self, bbox: dict, allowed_overhang_mil: float = 0.0) -> bool:
+        """判断给定 bbox 是否跟障碍物、禁布区冲突,或者没有完全落在板框内。"""
         for obstacle in self.obstacles:
             if geo.bboxes_collide(bbox, obstacle, self.clearance):
                 return True
@@ -81,10 +80,12 @@ class PlacementState:
         return False
 
     def commit(self, bbox: dict) -> None:
+        """把一个 bbox 登记成障碍物,后面的放置都要避开它。"""
         self.obstacles.append(bbox)
 
 
 def build_initial_state(snapshot: dict, regions_json: dict) -> PlacementState:
+    """从快照和 Stage A 的结果初始化布局状态。"""
     components: dict[str, PlacedComponent] = {}
     obstacles: list[dict] = []
     for component in snapshot.get("components", []):
@@ -96,21 +97,19 @@ def build_initial_state(snapshot: dict, regions_json: dict) -> PlacementState:
             bbox=bbox, locked=locked,
         )
         if locked:
-            obstacles.append(bbox)  # locked components are obstacles from the start, per the plan
+            obstacles.append(bbox)  # 按计划,锁定器件从一开始就是障碍物
 
-    # Every anchor body is also an obstacle from the very first intra-region
-    # placement, not just its own region's members avoiding it -- otherwise
-    # a neighboring region's shelf-packing could land members on top of an
-    # anchor that hasn't had its own region processed yet.
+    # 每个锚点本体,从区域内布局最开始就是障碍物,不只是"自己区域的成员
+    # 要避开它"——不然邻居区域的绕边打包可能会把成员堆到一个还没轮到处理
+    # 的锚点身上。
     anchor_ids = {region["anchorComponentId"] for region in regions_json.get("regions", [])}
     for anchor_id in anchor_ids:
         component = components.get(anchor_id)
         if component and not component.locked:
             obstacles.append(component.bbox)
 
-    # Unassigned components (regions.py couldn't attribute them to any
-    # anchor) are never moved by this tool, but they still physically occupy
-    # their current spot -- other components being placed must avoid them.
+    # 未分配的器件(regions.py 没法把它们归到任何锚点)不会被这个工具挪动,
+    # 但它们仍然实实在在占着原来的位置——别的器件放置的时候必须避开它们。
     for component_id in regions_json.get("unassigned", []):
         component = components.get(component_id)
         if component and component_id not in anchor_ids:
@@ -124,19 +123,19 @@ def build_initial_state(snapshot: dict, regions_json: dict) -> PlacementState:
         (tuple(k["center"]), k["radiusMil"])
         for k in regions_json.get("keepouts", []) if k.get("source") == "anchor-clearance"
     ]
-    # Polygon-sourced keepouts (EDA NO_COMPONENTS regions) are extracted by
-    # regions.py but NOT enforced here -- their `polygon` field is EasyEDA's
-    # raw internal polygon-source format, which this offline script has no
-    # decoder for (only board-outline lines/arcs are decoded). Flagged as a
-    # known v1 gap, not silently ignored.
+    # EDA 原生 region(NO_COMPONENTS 类型)来源的禁布区,regions.py 会提
+    # 取出来,但这里**没有**真正拿来做碰撞检测——它们的 `polygon` 字段是
+    # EasyEDA 内部的原始多边形格式,这个离线脚本没有解码器(只解码了板框
+    # 图层的直线/圆弧)。这是已知的 v1 缺口,不是被悄悄忽略掉的。
     return PlacementState(components=components, obstacles=obstacles, disc_keepouts=disc_keepouts, board=board)
 
 
 # ---------------------------------------------------------------------------
-# Decoupling / near-target-pin structural rule matching
+# 去耦 / 近目标引脚的结构化规则匹配
 # ---------------------------------------------------------------------------
 
 def match_rule(component: dict, rules: list[dict]) -> dict | None:
+    """按位号前缀 + 数值匹配规则表,返回第一个命中的规则。"""
     designator = component.get("designator", "")
     value = m.component_value(component)
     for rule in rules:
@@ -152,12 +151,11 @@ def match_rule(component: dict, rules: list[dict]) -> dict | None:
 
 
 def find_target_pin(component_pads: list[m.Pad], anchor_pins: list[dict]) -> dict | None:
-    """Structural targeting, not string/net guessing: a matched component
-    decouples a SPECIFIC anchor pin only if it has exactly one pad on a
-    ground-like net and another pad whose net matches one of the anchor's
-    actual pin nets. Returns that anchor pin dict, or None if the component
-    doesn't have this exact 2-net structure (so it falls back to shelf
-    placement instead of being force-fit near an arbitrary pin)."""
+    """结构化判定,不是靠字符串/网络名瞎猜:一个匹配到规则的器件,只有在
+    "恰好一个焊盘接地、另一个焊盘的网络正好是锚点某个引脚的网络"这种
+    结构下,才算是给那个**具体**引脚去耦。返回那个锚点引脚,如果器件
+    不满足这个 2 网络的结构就返回 None(于是退回 shelf 打包,而不是硬凑
+    到一个不相关的引脚旁边)。"""
     if len(component_pads) != 2:
         return None
     ground_pads = [p for p in component_pads if m.is_ground_net(p.net)]
@@ -172,10 +170,9 @@ def find_target_pin(component_pads: list[m.Pad], anchor_pins: list[dict]) -> dic
 
 
 def infer_side(point: tuple[float, float], anchor_bbox: dict) -> str:
-    """Which of the anchor's 4 sides `point` sits closest to, relative to
-    the anchor's own center -- whichever axis has the larger offset wins
-    (a pin sitting far to the anchor's left, even if only slightly above
-    center, reads as "left" not "top")."""
+    """判断 `point` 相对锚点自身中心,更靠近锚点的哪一边——哪个轴向的
+    偏移量更大就用哪个轴判(一个明显偏在锚点左边、只是稍微偏上一点点的
+    引脚,应该判成"left",不是"top")。"""
     center_x = (anchor_bbox["minX"] + anchor_bbox["maxX"]) / 2
     center_y = (anchor_bbox["minY"] + anchor_bbox["maxY"]) / 2
     dx, dy = point[0] - center_x, point[1] - center_y
@@ -185,14 +182,12 @@ def infer_side(point: tuple[float, float], anchor_bbox: dict) -> str:
 
 
 def find_connected_side(component_pads: list[m.Pad], anchor_pins: list[dict], anchor_bbox: dict) -> str | None:
-    """For components that don't qualify for find_target_pin's strict
-    2-net decoupling structure (e.g. a component with 3+ pads, or one where
-    neither pad is a clean ground/signal pair) but still share SOME net
-    with the anchor: place it on whichever side of the anchor its connected
-    pin(s) actually sit on, instead of an arbitrary round-robin slot. Only
-    components with genuinely zero net overlap with this anchor (tied to
-    the region purely by schematic-page grouping) fall through to
-    round-robin, since there's no electrical side to prefer for those."""
+    """给那些够不上 find_target_pin 严格"2 网络去耦结构"的器件用(比如
+    3 个以上焊盘,或者两个焊盘都不是干净的接地/信号对),但只要它跟锚点
+    还共享某个网络:就摆在它连的那(几)个引脚实际所在的那一侧,而不是
+    随便轮询分配。只有跟这个锚点真的一个网络都不共享的器件(纯粹靠原理
+    图页分组分进这个区域的)才会走轮询,因为那种情况没有"电气上该在哪
+    一侧"这回事。"""
     matching_pins = [pin for pin in anchor_pins for pad in component_pads if pad.net and pad.net == pin["net"]]
     if not matching_pins:
         return None
@@ -202,15 +197,15 @@ def find_connected_side(component_pads: list[m.Pad], anchor_pins: list[dict], an
 
 
 # ---------------------------------------------------------------------------
-# Intra-region placement
+# 区域内布局
 # ---------------------------------------------------------------------------
 
 def place_near_pin(state: PlacementState, component: PlacedComponent, anchor: PlacedComponent, pin: dict, max_distance_mil: float) -> bool:
-    """Try placing `component` near `pin`, oriented so its target-net pad
-    faces the pin (a loop-shortening heuristic, not a real inductance
-    solver -- see plan limitations). Tries increasing radii and several
-    angles per radius; returns False (component left unplaced) if nothing
-    fits within max_distance_mil."""
+    """尝试把 `component` 放到 `pin` 附近,朝向调整成让它接目标网络的那个
+    焊盘正对着这个引脚(这是个"缩短回路"的启发式做法,不是真正的电感
+    求解器——见计划里的限制说明)。按半径递增、每个半径多个角度去试;
+    如果在 max_distance_mil 范围内怎么都放不下,返回 False(器件保持
+    未放置状态)。"""
     width = component.bbox["maxX"] - component.bbox["minX"]
     height = component.bbox["maxY"] - component.bbox["minY"]
     half_diag = math.hypot(width, height) / 2
@@ -234,11 +229,11 @@ def place_near_pin(state: PlacementState, component: PlacedComponent, anchor: Pl
             if state.collides(candidate_bbox):
                 continue
             component.x, component.y = cx, cy
-            component.rotation = angle % 360  # power-net pad faces the target pin
+            component.rotation = angle % 360  # 让接电源网络的焊盘正对目标引脚
             component.bbox = candidate_bbox
             component.moved = True
             state.commit(candidate_bbox)
-            debug_log(f"{component.designator}: placed near pin {pin.get('number')} at "
+            debug_log(f"{component.designator}: 贴到引脚 {pin.get('number')} 附近,"
                       f"radius={radius:.0f} angle={angle:.0f}")
             return True
     if DEBUG and first_candidate is not None:
@@ -249,11 +244,11 @@ def place_near_pin(state: PlacementState, component: PlacedComponent, anchor: Pl
         component.moved = True
         component.forced = True
         state.commit(candidate_bbox)
-        debug_log(f"{component.designator}: FORCED near pin {pin.get('number')} "
-                  f"(no collision-free slot found within {max_distance_mil}mil)")
+        debug_log(f"{component.designator}: 强行放到引脚 {pin.get('number')} 附近"
+                  f"(在 {max_distance_mil}mil 范围内找不到不冲突的位置)")
         return True
-    debug_log(f"{component.designator}: could not place near pin {pin.get('number')} "
-              f"within {max_distance_mil}mil, falling back to shelf placement")
+    debug_log(f"{component.designator}: 在 {max_distance_mil}mil 范围内放不到引脚 {pin.get('number')} 附近,"
+              f"退回 shelf 打包")
     return False
 
 
@@ -262,11 +257,10 @@ SIDE_ORDER = ["right", "bottom", "left", "top"]
 
 
 def make_side_cursors(anchor_bbox: dict, clearance: float, wrap_width: float) -> dict[str, dict]:
-    """One packing cursor per side of the anchor, so members actually
-    surround it -- right/left sides fill in columns running top-to-bottom
-    (stacking further right/left as a column fills), top/bottom sides fill
-    in rows running left-to-right (stacking further up/down as a row fills).
-    This replaces a single shelf that only ever grew to the anchor's right."""
+    """给锚点的每一侧各配一个打包游标,让成员真正围着锚点摆——右/左两侧
+    按列从上往下填(一列填满了往右/左再开一列),上/下两侧按行从左往右填
+    (一行填满了往上/下再开一行)。这样就不再是只会往锚点右边长的单条
+    shelf 了。"""
     return {
         "right": {"axis": "y", "fill_sign": 1, "wrap_sign": 1,
                   "fill_pos": anchor_bbox["minY"], "wrap_base": anchor_bbox["maxX"] + clearance,
@@ -284,22 +278,18 @@ def make_side_cursors(anchor_bbox: dict, clearance: float, wrap_width: float) ->
 
 
 def place_around_anchor(state: PlacementState, component: PlacedComponent, cursor: dict, allow_force: bool = True) -> bool:
-    """Pack `component` into one side of the anchor (see make_side_cursors),
-    filling along the row/column and wrapping outward when a row/column
-    fills up. `cursor` is a mutable dict SHARED across every member placed
-    on this side (each call picks up where the previous one left off), so
-    this function must leave it in a sane state even when it fails: capped
-    wraps (not raw iteration count) prevent a bad run of collisions from
-    walking the cursor an unbounded distance in a single call, and on
-    give-up the cursor is rolled back to where this call started (rather
-    than left wherever the failed search wandered to) so the NEXT sibling
-    on this side isn't placed relative to a corrupted position.
+    """把 `component` 打包进锚点的某一侧(见 make_side_cursors),沿着行/列
+    方向填充,填满了就往外换行/换列。`cursor` 是这一侧所有成员共用的可变
+    状态(每次调用都接着上一次的位置继续),所以就算这次调用失败了,也
+    必须让它保持在一个正常的状态:限制换行/换列次数(而不是限制原始
+    迭代次数),防止一连串的冲突把游标带到离谱的地方;放弃的时候把游标
+    回滚到这次调用开始前的状态(而不是留在失败搜索走到的地方),这样
+    这一侧的下一个成员就不会摆在一个被搞坏的位置上面。
 
-    `allow_force=False` disables --debug's force-on-exhaustion fallback for
-    this call specifically -- used when trying several sides in preference
-    order (electrically-preferred side first, e.g. a side pinned against the
-    board edge), so an earlier, less-preferred side doesn't eat the forced
-    placement before a later side even gets a real, non-colliding try."""
+    `allow_force=False` 会关掉这次调用里 --debug 的"用尽预算就强行放置"
+    这个兜底——用在按优先级依次尝试好几侧的场景(电气上更合适的那一侧
+    先试,比如某一侧正好贴着板边),这样前面几个不太合适的侧就不会在
+    后面的侧还没真正试过(没冲突的)位置之前,就把强行放置的名额占掉。"""
     width = component.bbox["maxX"] - component.bbox["minX"]
     height = component.bbox["maxY"] - component.bbox["minY"]
     fill_size = height if cursor["axis"] == "y" else width
@@ -322,17 +312,17 @@ def place_around_anchor(state: PlacementState, component: PlacedComponent, curso
             state.commit(candidate_bbox)
             cursor["fill_pos"] = fill_pos + fill_size + state.clearance
             cursor["wrap_pos"] = wrap_pos
-            debug_log(f"{component.designator}: placed at ({cx:.0f}, {cy:.0f})")
+            debug_log(f"{component.designator}: 放到 ({cx:.0f}, {cy:.0f})")
             return True
         fill_pos += fill_size + state.clearance
         if fill_pos - entry_fill_pos > cursor["wrap_width"]:
             fill_pos = entry_fill_pos
             wrap_pos += cross_size + state.clearance
             wraps += 1
-    # Give up: roll the shared cursor back to where this call started so a
-    # failed search doesn't drag every later sibling's placement along with
-    # it, then advance past this component's own footprint as if it had
-    # landed at first_candidate (whether or not we actually force-place it).
+    # 放弃:把共用游标回滚到这次调用开始前的状态,不让一次失败的搜索
+    # 拖累后面所有兄弟成员的位置,然后把游标推进这个器件自己的尺寸那么
+    # 多(就当它已经落在 first_candidate 那样,不管到底有没有真的强行
+    # 放置它)。
     cursor["fill_pos"] = entry_fill_pos + fill_size + state.clearance
     cursor["wrap_pos"] = entry_wrap_pos
     if DEBUG and allow_force and first_candidate is not None:
@@ -342,25 +332,25 @@ def place_around_anchor(state: PlacementState, component: PlacedComponent, curso
         component.moved = True
         component.forced = True
         state.commit(candidate_bbox)
-        debug_log(f"{component.designator}: FORCED placement at ({cx:.0f}, {cy:.0f}) (no free slot found)")
+        debug_log(f"{component.designator}: 强行放到 ({cx:.0f}, {cy:.0f})(找不到空位)")
         return True
-    debug_log(f"{component.designator}: placement exhausted {MAX_SHELF_ROW_WRAPS} wraps with no free slot")
+    debug_log(f"{component.designator}: 换了 {MAX_SHELF_ROW_WRAPS} 轮还是没有空位")
     return False
 
 
-# Intra-region placement for each region is done directly in main(), where a
-# designator -> value lookup closure (matched_rule_for) is available: any
-# component with a structural pin target goes through place_near_pin,
-# everything else is round-robined across the anchor's 4 side cursors via
-# place_around_anchor, and the resulting per-region bbox is handed to the
-# macro placement stage below as one rigid unit.
+# 每个区域的区域内布局是在 main() 里直接完成的,那里能拿到一个
+# 位号 -> 数值 的查表闭包(matched_rule_for):任何有结构化引脚目标的
+# 器件走 place_near_pin,其余的靠 place_around_anchor 轮询/按侧摆到锚点
+# 四周,每个区域算出来的 bbox 交给下面的宏观打包阶段当成一个刚体来摆。
 
 
 # ---------------------------------------------------------------------------
-# Macro placement
+# 宏观打包
 # ---------------------------------------------------------------------------
 
 def apply_region_rigid_transform(state: PlacementState, region: dict, anchor_new_pos: tuple[float, float], theta_deg: float) -> None:
+    """把整个区域(锚点 + 全部成员)当成一个刚体,旋转 theta_deg、平移到
+    锚点的新位置。"""
     anchor = state.components[region["anchorComponentId"]]
     pivot = (anchor.x, anchor.y)
     member_ids = [region["anchorComponentId"]] + region["memberComponentIds"]
@@ -381,6 +371,8 @@ def apply_region_rigid_transform(state: PlacementState, region: dict, anchor_new
 
 
 def macro_place_regions(state: PlacementState, regions: list[dict], region_params: dict, local_bboxes: dict[str, dict], report: dict) -> None:
+    """把每个区域整体摆到板子上的最终位置:有 edgeConstraint 的先摆,剩下
+    的按 type 分组做行排列打包。"""
     board_bounds = state.board.bounds()
     edge_regions = [r for r in regions if (region_params.get(r["anchorDesignator"]) or {}).get("edgeConstraint")]
     other_regions = [r for r in regions if r not in edge_regions]
@@ -391,11 +383,10 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
         local_bbox = local_bboxes[region["anchorDesignator"]]
         anchor = state.components[region["anchorComponentId"]]
         if anchor.locked:
-            return True  # locked anchor's region is never repositioned; already validated in place
-        # target_x/target_y is the desired new anchor position; theta_deg is
-        # the rotation DELTA to apply to the whole region (0 for non-edge
-        # regions, requiredRotation - anchor.rotation for edge-constrained
-        # ones -- computed by the caller).
+            return True  # 锚点锁定的区域永远不重新摆位置;已经在别处校验过了
+        # target_x/target_y 是锚点想要摆到的新位置;theta_deg 是要施加给
+        # 整个区域的旋转增量(非边缘区域是 0,边缘约束区域是
+        # requiredRotation - anchor.rotation,调用方算好传进来)。
         rotated_local = geo.rotated_bbox(local_bbox, (anchor.x, anchor.y), theta_deg)
         shift_x = target_x - anchor.x
         shift_y = target_y - anchor.y
@@ -411,8 +402,8 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
             anchor.forced = True
             for member_id in region["memberComponentIds"]:
                 state.components[member_id].forced = True
-            debug_log(f"{region['anchorDesignator']}: FORCED macro placement at "
-                      f"({target_x:.0f}, {target_y:.0f}) (still collides with something)")
+            debug_log(f"{region['anchorDesignator']}: 强行宏观放置到 "
+                      f"({target_x:.0f}, {target_y:.0f})(仍然有冲突)")
         state.commit(state.components[region["anchorComponentId"]].bbox)
         for member_id in region["memberComponentIds"]:
             member = state.components[member_id]
@@ -466,10 +457,9 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
         width = local_bbox["maxX"] - local_bbox["minX"]
         height = local_bbox["maxY"] - local_bbox["minY"]
         placed = False
-        # Scan forward from the shared cursor: on collision, advance (and
-        # row-wrap as needed) and retry, rather than giving up at the first
-        # spot -- a single failed attempt must not stall every region behind
-        # it in the packing order.
+        # 从共用游标往前扫:碰到冲突就往前挪(必要时换行)再试,而不是
+        # 卡在第一个位置——单个区域失败一次,不能把排在它后面的所有区域
+        # 都一起卡住。
         guard = 400
         first_target = None
         while guard > 0:
@@ -479,7 +469,7 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
                 cursor["y"] += cursor["row_height"] + state.clearance
                 cursor["row_height"] = 0.0
             if cursor["y"] + height > board_bounds["maxY"]:
-                break  # out of board space entirely; report and move on
+                break  # 板子空间完全用完了;记下来跳过
             target_x, target_y = cursor["x"] + width / 2, cursor["y"] + height / 2
             if first_target is None:
                 first_target = (target_x, target_y)
@@ -488,7 +478,7 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
                 cursor["row_height"] = max(cursor["row_height"], height)
                 placed = True
                 break
-            cursor["x"] += 50.0  # probe the next slot in this row
+            cursor["x"] += 50.0  # 探测这一行的下一个位置
         if not placed and DEBUG and first_target is not None:
             placed = place_region_bbox(region, first_target[0], first_target[1], 0.0, 0.0, force=True)
             if placed:
@@ -499,6 +489,7 @@ def macro_place_regions(state: PlacementState, regions: list[dict], region_param
 
 
 def check_far_from(state: PlacementState, regions: list[dict], region_params: dict, report: dict) -> None:
+    """检查 farFrom 约束:两个区域锚点之间的边到边距离,是否满足要求的最小距离。"""
     by_designator = {r["anchorDesignator"]: r for r in regions}
     for designator, params in region_params.items():
         for entry in params.get("farFrom") or []:
@@ -519,20 +510,20 @@ def check_far_from(state: PlacementState, regions: list[dict], region_params: di
 
 
 # ---------------------------------------------------------------------------
-# Wirelength estimate
+# 线长估算
 # ---------------------------------------------------------------------------
 
 def estimate_wirelength(pads: list[m.Pad], positions: dict[str, tuple[float, float]], excluded_nets: set[str]) -> float:
+    """按网络分组,用每个网络焊盘位置的最小生成树长度之和,估算总线长。"""
     by_net: dict[str, list[tuple[float, float]]] = {}
     for pad in pads:
         if not pad.net or pad.net in excluded_nets:
             continue
         point = positions.get(pad.component_id, (pad.x, pad.y)) if pad.component_id else (pad.x, pad.y)
-        # Pads move rigidly with their component; approximate the pad's new
-        # position as its component's new position offset by the pad's
-        # original offset from the component's original position. Exact
-        # recomputation (rotate_around per component delta) is done for the
-        # actual changes.json output; this estimate is a proxy metric only.
+        # 焊盘是跟着自己的器件刚性移动的;这里用"器件的新位置 + 焊盘相对
+        # 器件原始位置的偏移"来近似焊盘的新位置。真正精确的重新计算
+        # (按每个器件的旋转增量做 rotate_around)是在生成 changes.json
+        # 的时候做的;这里只是一个估算用的代理指标。
         by_net.setdefault(pad.net, []).append(point)
     total = 0.0
     for points in by_net.values():
@@ -541,6 +532,7 @@ def estimate_wirelength(pads: list[m.Pad], positions: dict[str, tuple[float, flo
 
 
 def wirelength_excluded_nets(snapshot: dict, net_usage: dict[str, int], threshold: int) -> set[str]:
+    """算线长时要排除的网络:接地网络、已经有铺铜的网络、使用数超过阈值的全局网络。"""
     excluded = {net for net in net_usage if m.is_ground_net(net)}
     excluded |= m.pours_by_net(snapshot)
     excluded |= {net for net, count in net_usage.items() if count > threshold}
@@ -548,7 +540,7 @@ def wirelength_excluded_nets(snapshot: dict, net_usage: dict[str, int], threshol
 
 
 # ---------------------------------------------------------------------------
-# Main
+# 主函数
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -557,18 +549,17 @@ def main() -> None:
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--regions", required=True)
     parser.add_argument("--region-params", required=True)
-    parser.add_argument("--rules", default=None, help="defaults to rules.default.json next to this script")
-    parser.add_argument("--out", required=True, help="changes.json output path")
-    parser.add_argument("--report-out", default=None, help="defaults to report.json next to --out")
+    parser.add_argument("--rules", default=None, help="默认是这个脚本同目录下的 rules.default.json")
+    parser.add_argument("--out", required=True, help="changes.json 输出路径")
+    parser.add_argument("--report-out", default=None, help="默认是 --out 同目录下的 report.json")
     parser.add_argument("--clearance-mil", type=float, default=DEFAULT_CLEARANCE_MIL)
     parser.add_argument("--wirelength-net-usage-threshold", type=int, default=DEFAULT_WIRELENGTH_NET_USAGE_THRESHOLD)
     parser.add_argument("--debug", action="store_true",
-                         help="verbose per-placement tracing to stderr, and force a best-effort "
-                              "(possibly colliding) position for anything that exhausts its retry "
-                              "budget instead of leaving it untouched -- so changes.json always "
-                              "comes out complete enough to render and inspect. Every forced "
-                              "placement is still recorded in report.json's forcedPlacements list; "
-                              "the gate does not treat --debug output as apply-ready.")
+                         help="把每一步布局决策详细 trace 到 stderr,并且对任何用尽重试预算的"
+                              "东西,强行给一个尽力而为(可能还有冲突)的位置,而不是保持原地"
+                              "不动——这样 changes.json 总能完整到可以渲染查看。每一个强行放置"
+                              "的都还是会记进 report.json 的 forcedPlacements 列表;门禁不会把"
+                              "--debug 的结果当成可以直接应用。")
     args = parser.parse_args()
 
     global DEBUG
@@ -601,10 +592,9 @@ def main() -> None:
         "estimatedWireLengthBefore": 0.0, "estimatedWireLengthAfter": 0.0, "wirelengthRegression": False,
     }
 
-    # Patch match_rule's value lookup: PlacedComponent doesn't carry `value`,
-    # so build a designator -> value map once and monkey-match via closures
-    # in place_region_members through a small wrapper instead of threading
-    # an extra parameter through every helper signature.
+    # 给 match_rule 的数值查找打个补丁:PlacedComponent 本身不带 `value`
+    # 字段,所以这里一次性建好一张 位号 -> 数值 的表,通过一个小闭包在
+    # 下面按需查,而不是把这个额外参数一路穿透传给每个辅助函数。
     value_by_component_id = {cid: m.component_value(c) for cid, c in components_by_id.items()}
 
     def matched_rule_for(component_id: str, designator: str) -> dict | None:
@@ -616,11 +606,10 @@ def main() -> None:
         try:
             anchor = state.components[region["anchorComponentId"]]
             anchor_pins = region["anchorPins"]
-            # Members spread across 4 sides (not just one shelf to the
-            # right), so wrap_width is sized per side using roughly a
-            # quarter of the region's members.
+            # 成员分散到 4 个侧边摆(不再是全部堆到锚点右边一条 shelf),
+            # 所以 wrap_width 按每侧大概分到这个区域四分之一的成员数来定尺寸。
             member_count = max(1, len(region["memberComponentIds"]))
-            avg_item_span = 80.0  # rough default footprint span (mil); good enough to size the wrap width
+            avg_item_span = 80.0  # 粗略的默认器件尺寸(mil),够用来估 wrap_width 了
             wrap_width = max(300.0, math.sqrt(member_count / 4) * avg_item_span * 1.5)
             side_cursors = make_side_cursors(anchor.bbox, state.clearance, wrap_width)
             next_side = 0
@@ -630,11 +619,10 @@ def main() -> None:
                 if member.locked:
                     member_boxes.append(member.bbox)
                     continue
-                # Structural pin targeting is the default strategy for ANY
-                # component with a real 2-net (signal + ground) tie to a
-                # specific anchor pin -- matching a rule only narrows how
-                # close ("maxDistanceMil"), it doesn't gate whether "near its
-                # pin" is even attempted.
+                # 结构化引脚定位是默认策略,只要器件跟某个具体锚点引脚有
+                # 真实的 2 网络(信号+地)连接关系,不管有没有规则命中都会
+                # 走这条路——规则只是收窄"贴多近"(maxDistanceMil),不
+                # 决定"要不要贴引脚"。
                 member_pads = pads_by_component.get(member_id, [])
                 rule = matched_rule_for(member_id, member.designator)
                 placed = False
@@ -643,21 +631,19 @@ def main() -> None:
                     max_distance = rule.get("maxDistanceMil", DEFAULT_NEAR_PIN_MAX_DISTANCE_MIL) if rule else DEFAULT_NEAR_PIN_MAX_DISTANCE_MIL
                     placed = place_near_pin(state, member, anchor, pin, max_distance)
                 if not placed:
-                    # Not a clean 2-net decoupling match (3+ pads, or neither
-                    # pad is ground) -- but if it still shares ANY net with
-                    # an anchor pin, that connection's side wins over an
-                    # arbitrary round-robin slot. Only components with zero
-                    # net overlap with this anchor (tied to the region only
-                    # by schematic-page grouping) fall back to round-robin.
+                    # 不满足严格的 2 网络去耦结构(3 个以上焊盘,或者两个
+                    # 焊盘都不是地)——但只要它跟锚点还共享某个网络,那个
+                    # 连接所在的那一侧就该赢过随便轮询分配的位置。只有
+                    # 跟这个锚点零网络重叠的器件(纯靠原理图页分组分进来
+                    # 的)才会走轮询。
                     preferred_side = find_connected_side(member_pads, anchor_pins, anchor.bbox)
                     if preferred_side is None:
                         preferred_side = SIDE_ORDER[next_side % len(SIDE_ORDER)]
                         next_side += 1
-                    # The preferred side might be pinned against the board
-                    # edge (e.g. a connector's outward-facing pins) with no
-                    # real room -- try it first, but degrade to the other 3
-                    # sides for a genuine (non-forced) slot before resorting
-                    # to --debug's force-placement on any one side.
+                    # 电气上"该去的那一侧"可能刚好贴着板边没有真实空间
+                    # (比如连接器朝外的引脚)——先试它,但如果没有真的
+                    # (非强行)空位,就依次降级尝试另外三侧,最后才轮到
+                    # --debug 在某一侧强行放置。
                     side_attempts = [preferred_side] + [s for s in SIDE_ORDER if s != preferred_side]
                     for attempt_index, side in enumerate(side_attempts):
                         is_last_attempt = attempt_index == len(side_attempts) - 1
@@ -669,13 +655,11 @@ def main() -> None:
                         "type": "placement_failed", "componentId": member_id, "designator": member.designator,
                         "region": designator,
                     })
-                    # It stays at its original position rather than moving --
-                    # protect that spot as an obstacle, and mark it so the
-                    # region's later rigid-body transform (macro placement)
-                    # skips it instead of sweeping it along by mistake. It is
-                    # deliberately NOT added to member_boxes: the region's local
-                    # bbox represents what actually moves together as one rigid
-                    # unit, and this component doesn't.
+                    # 它留在原来的位置,不移动——把这个位置登记成障碍物,
+                    # 并标记一下,这样区域后续的刚体变换(宏观打包)阶段
+                    # 会跳过它,不会误把它一起搬走。这里故意**不**把它加进
+                    # member_boxes:区域的局部 bbox 代表的是真正会一起
+                    # 刚性移动的那部分,这个器件不算在内。
                     state.commit(member.bbox)
                     member.unplaceable = True
                 else:
@@ -683,8 +667,8 @@ def main() -> None:
             local_bboxes[designator] = geo.bbox_from_points(
                 [p for box in member_boxes for p in geo.bbox_corners(box)]
             )
-        except Exception as error:  # noqa: BLE001 -- one bad region must not abort the whole run
-            debug_log(f"{designator}: SKIPPED due to an unexpected error: {error!r}")
+        except Exception as error:  # noqa: BLE001 -- 一个区域出错不能拖垮整个运行
+            debug_log(f"{designator}: 因为意外错误被跳过:{error!r}")
             report["skippedRegions"].append({"anchorDesignator": designator, "error": repr(error)})
             local_bboxes[designator] = state.components[region["anchorComponentId"]].bbox
 
@@ -702,11 +686,10 @@ def main() -> None:
             continue
         if not geo.bbox_fully_inside_board(component.bbox, state.board, 0.0):
             report["outsideBoard"].append(component_id)
-    # Only flag a pair as a NEW overlap if at least one side actually moved --
-    # two components that were already touching (or whose bboxes already
-    # overlapped, e.g. attribute-text-inflated bboxes) before this tool ran
-    # are a pre-existing board condition, not something this run introduced,
-    # and shouldn't block the gate on a run that never touched either of them.
+    # 只有当两者中至少有一个真的移动过,才把这一对判成"新出现的重叠"——
+    # 两个从来没被这次运行动过的器件,它们的 bbox 本来就可能有重叠(比如
+    # 属性文字撑大了 bbox),那是这次运行之前就有的既有情况,不是这次
+    # 运行造成的,不该因为这个去卡这次没碰过它们俩的运行结果。
     items = list(state.components.items())
     for i, (id_a, comp_a) in enumerate(items):
         for id_b, comp_b in items[i + 1:]:
@@ -734,15 +717,15 @@ def main() -> None:
         report_out = str(Path(args.out).with_name("report.json"))
     m.save_json(report_out, report)
 
-    print(f"{len(changes)} components moved")
-    print(f"report: outsideBoard={len(report['outsideBoard'])} overlaps={len(report['overlaps'])} "
+    print(f"{len(changes)} 个器件被移动")
+    print(f"report:outsideBoard={len(report['outsideBoard'])} overlaps={len(report['overlaps'])} "
           f"unsatisfiedConstraints={len(report['unsatisfiedConstraints'])} unassigned={len(report['unassigned'])} "
           f"forcedPlacements={len(report['forcedPlacements'])} skippedRegions={len(report['skippedRegions'])} "
           f"wirelengthRegression={report['wirelengthRegression']}")
     if DEBUG and report["forcedPlacements"]:
-        print(f"--debug forced {len(report['forcedPlacements'])} placements despite unresolved collisions -- "
-              f"apply_gate.py will refuse this output, this run is for visualization only.")
-    print(f"Wrote {args.out} and {report_out}")
+        print(f"--debug 强行放置了 {len(report['forcedPlacements'])} 个还有未解决冲突的器件 —— "
+              f"apply_gate.py 会拒绝这份结果,这次运行只是给你看布局用的。")
+    print(f"已写入 {args.out} 和 {report_out}")
 
 
 if __name__ == "__main__":

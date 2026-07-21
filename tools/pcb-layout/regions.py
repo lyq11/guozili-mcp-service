@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Stage A: assign every non-anchor component to the U-anchor it belongs to,
-extract the board polygon and keepouts, and emit a region-params template for
-the AI to fill in with real semantic layout hints.
+"""Stage A:把每个非锚点器件归属到它所属的 U 锚点,提取板框多边形和禁布区,
+并生成一份 region-params 模板,交给 AI 填入真正有语义的布局提示。
 """
 
 from __future__ import annotations
@@ -11,23 +10,20 @@ import argparse
 import geometry as geo
 import model as m
 
-# EPCB_PrimitiveRegionRuleType.NO_COMPONENTS, from @jlceda/pro-api-types --
-# regions tagged with this rule type are placement keepouts.
+# EPCB_PrimitiveRegionRuleType.NO_COMPONENTS,来自 @jlceda/pro-api-types --
+# 带这个规则类型的 region 是禁止放置器件的禁布区。
 NO_COMPONENTS_RULE_TYPE = 2
 
-# Rough default clearance disc (mil) around antenna/connector anchors, for
-# projects that don't already model RF/mechanical clearance as a PCB region.
-# This is a placeholder meant to be tuned per project, not an engineering
-# constant -- pass --anchor-clearance-mil to override.
+# 天线/连接器锚点周围的默认间距圆盘半径(mil)的粗略默认值,给那些还没
+# 有把 RF/机械间距建模成 PCB region 的项目用。这是个占位默认值,是需要
+# 按项目调的,不是工程常量——想覆盖就传 --anchor-clearance-mil。
 DEFAULT_ANCHOR_CLEARANCE_MIL = 100.0
 
 
 def net_score(component_pads: list[m.Pad], anchor_pads: list[m.Pad], net_usage: dict[str, int]) -> float:
-    """Inverse-frequency net score: a net shared with only the anchor and
-    this component (usage_count=2) contributes 0.5; a net used by 40
-    components contributes 0.025. GND is excluded entirely so the most
-    common rail on the board doesn't make every component look related to
-    every anchor."""
+    """逆频率网络评分:只被锚点和这个器件共享的网络(使用数=2)贡献
+    0.5;被 40 个器件共享的网络贡献 0.025。GND 整个排除在外,不然板上
+    最常见的那根地线会让每个器件看起来都跟每个锚点相关。"""
     component_nets = {pad.net for pad in component_pads if pad.net and not m.is_ground_net(pad.net)}
     anchor_nets = {pad.net for pad in anchor_pads if pad.net and not m.is_ground_net(pad.net)}
     shared = component_nets & anchor_nets
@@ -40,6 +36,7 @@ def build_regions(
     anchors: dict[str, dict],
     anchor_clearance_mil: float = DEFAULT_ANCHOR_CLEARANCE_MIL,
 ) -> tuple[dict, dict]:
+    """构建区域归属结果:board polygon、禁布区、每个锚点的成员列表、未分配列表。"""
     components_by_designator = m.component_by_designator(snapshot)
     components_by_id = m.component_by_id(snapshot)
     pads = m.all_pads(snapshot)
@@ -53,12 +50,12 @@ def build_regions(
         c.get("designator"): c.get("pageUuid") for c in schematic_components if c.get("designator")
     }
 
-    anchor_ids: dict[str, str] = {}  # designator -> componentId
+    anchor_ids: dict[str, str] = {}  # 位号 -> 器件 id
     anchor_pages: dict[str, str] = {}
     for designator, info in anchors.items():
         component = components_by_designator.get(designator)
         if not component:
-            continue  # anchors.json referenced a designator not present in this snapshot
+            continue  # anchors.json 里提到的位号,在这份快照里找不到
         anchor_ids[designator] = component["id"]
         page = schematic_page_by_designator.get(designator)
         if page:
@@ -83,7 +80,7 @@ def build_regions(
 
         chosen: str | None = None
         if len(page_anchors) == 1:
-            chosen = page_anchors[0]  # unambiguous page match
+            chosen = page_anchors[0]  # 原理图页匹配到唯一一个锚点,没有歧义
         else:
             candidates = page_anchors if page_anchors else list(anchor_ids.keys())
             best_designator, best_score = None, 0.0
@@ -150,9 +147,9 @@ def main() -> None:
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--schematic-components", required=True)
     parser.add_argument("--anchors", required=True)
-    parser.add_argument("--out", required=True, help="regions.json output path")
+    parser.add_argument("--out", required=True, help="regions.json 输出路径")
     parser.add_argument("--region-params-template-out", default=None,
-                         help="defaults to region-params.template.json next to --out")
+                         help="默认是 --out 同目录下的 region-params.template.json")
     parser.add_argument("--anchor-clearance-mil", type=float, default=DEFAULT_ANCHOR_CLEARANCE_MIL)
     args = parser.parse_args()
 
@@ -171,10 +168,10 @@ def main() -> None:
         template_out = str(Path(args.out).with_name("region-params.template.json"))
     m.save_json(template_out, region_params_template)
 
-    print(f"{len(regions_json['regions'])} regions, {len(regions_json['unassigned'])} unassigned components")
+    print(f"{len(regions_json['regions'])} 个区域,{len(regions_json['unassigned'])} 个未分配器件")
     if not regions_json["board"]["polygon"]["outer"]:
-        print("WARNING: board outline did not close into a polygon -- containment checks will reject everything")
-    print(f"Wrote {args.out} and {template_out}")
+        print("警告:板框没有闭合成多边形——所有的包含性检查都会被拒绝")
+    print(f"已写入 {args.out} 和 {template_out}")
 
 
 if __name__ == "__main__":

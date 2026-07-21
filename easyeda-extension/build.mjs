@@ -33,7 +33,14 @@ if (!process.argv.includes("--compile")) {
   for (const name of ["README.md", "CHANGELOG.md", "LICENSE"]) {
     zip.file(name, fs.readFileSync(path.join(root, name)));
   }
-  for (const name of ["logo.png", "banner.jpg"]) {
+  for (const name of [
+    "logo.png",
+    "banner.jpg",
+    "demo-schematic.png",
+    "demo-connection.png",
+    "demo-pcb-operation.png",
+    "demo-backup.png",
+  ]) {
     zip.file(`images/${name}`, fs.readFileSync(path.join(root, "images", name)));
   }
   // 状态悬浮窗页面按原文件名放入安装包的 iframe 目录。
