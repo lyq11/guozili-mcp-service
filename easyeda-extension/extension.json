@@ -3,7 +3,7 @@
   "uuid": "e6818569b67a4b3c9eb00426a52aab6c",
   "displayName": "果子狸MCP服务",
   "description": "通过本机结构化白名单 RPC 将嘉立创 EDA 专业版原理图安全接入 MCP 客户端。",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "lyq11",
   "engines": {
     "eda": "~3.2.0"
@@ -16,7 +16,8 @@
   "categories": ["Schematic", "Other"],
   "keywords": ["MCP", "AI", "RPC", "EasyEDA", "嘉立创EDA", "原理图"],
   "images": {
-    "logo": "./images/logo.png"
+    "logo": "./images/logo.png",
+    "banner": "./images/banner.jpg"
   },
   "homepage": "https://github.com/lyq11/guozili-mcp-service#readme",
   "bugs": "https://github.com/lyq11/guozili-mcp-service/issues",

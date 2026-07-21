@@ -2,6 +2,12 @@
 
 果子狸MCP服务是嘉立创 EDA / EasyEDA 专业版的本地 MCP 连接扩展。它与用户电脑上运行的 MCP 服务配合，让 AI 客户端能够通过结构化工具读取和编辑当前原理图与 PCB。
 
+## 功能演示
+
+![AI 通过本机安全网关连接并编辑 EasyEDA 原理图与 PCB](./images/banner.jpg)
+
+AI 客户端通过本机 MCP 服务和白名单 RPC 连接 EasyEDA；扩展负责读取原理图与 PCB、执行经过校验的结构化操作，并在首次写入前建立安全备份。
+
 ## 功能
 
 - 无需先打开图页即可列出当前工程中的全部原理图和图页。
@@ -45,9 +51,5 @@
 
 - 源码：`https://github.com/lyq11/guozili-mcp-service`
 - 问题反馈：`https://github.com/lyq11/guozili-mcp-service/issues`
-
-## 待补充
-
-- 缺少功能演示图或功能演示 GIF。
 
 许可证：Apache-2.0。
