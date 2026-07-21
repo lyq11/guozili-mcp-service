@@ -1,5 +1,36 @@
 # 更新日志
 
+## 0.8.0 - 2026-07-21
+
+- 新增 `pcb_list_stackups` 与 `pcb_set_stackup`，支持读取物理叠层模板、设置 2–32 层偶数铜层、按顺序命名内层，以及覆写当前物理叠层；`pcb_create_from_schematic` 同步支持 `stackup` 参数。
+- 新增 `pcb_apply_net_track_policy`，可按精确网络名或 glob 批量预览/修改直线、圆弧和折线走线的线宽、铜层与锁定状态。
+- 新增 `pcb_arrange_components`，依次执行边缘/中心对齐、水平/垂直等边缘间距以及栅格吸附；默认仅预览。
+- `pcb_modify_tracks` 扩展为覆盖铜层直线、圆弧和折线，并继续验证原图元 ID 不变。
+
+## 0.7.0 - 2026-07-21
+
+- 新增 `pcb_create_board_outline`，在独立的 Board Outline 层创建矩形、闭合多边形或用于补缺口的开放路径，并支持闭合轮廓圆角。
+- 新增 `pcb_modify_tracks` 与 `pcb_modify_vias`，通过 EasyEDA 原生 `modify` API 原地修改走线和过孔并验证图元 ID 保持不变。
+- 板框仍使用空网络，铜走线仍严格要求有效网络和启用的铜层，两类操作的校验互不放宽。
+
+## 0.6.0 - 2026-07-21
+
+- 新增 `pcb_create_from_schematic`，可创建 PCB、建立 Board 关联并导入原理图器件。
+- 新增 `pcb_find_board_outline` 与 `pcb_check_board_outline`，分别用于搜索板框图元和检查板框闭合性。
+- 新增 `pcb_group_components_by_schematic_page`，按原理图页规划器件分组；默认仅预览，`apply=true` 时才执行布局。
+
+## 0.5.4 - 2026-07-21
+
+- 新增 `pcb_create_pads`，支持显式创建顶层/底层贴片焊盘，以及带圆孔或槽孔的多层焊盘。
+- PCB 快照与连通性分析现会包含独立焊盘。
+- 修复器件焊盘在快照中被重复统计的问题，并把扩展 `tsc --noEmit` 纳入根项目检查命令。
+- 优化游离导线检测：先按网络和铜层分组，再用 sweep-line 包围盒空间筛选候选线段；焊盘和过孔也按网络索引。
+
+## 0.5.3 - 2026-07-21
+
+- 新增 PCB 游离直线导线的保守检测与删除工具；删除前自动复查，首次写入自动创建 `[backup]` PCB。
+- 为避免误删，默认跳过含铺铜、圆弧走线、折线走线的网络以及锁定导线。
+
 ## 0.5.2 - 2026-07-21
 
 - 原理图缓存新增项目级网络索引，从真实导线、网络端口和网络标签汇总网络名。

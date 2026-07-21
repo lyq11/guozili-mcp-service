@@ -15,6 +15,8 @@ export const CAPABILITIES = [
   'operations.apply',
   'schematic.runDrc',
   'pcb.listBoards',
+  'pcb.create',
+  'pcb.stackups.list',
   'pcb.inspect',
   'pcb.inspectRegion',
   'pcb.runDrc',

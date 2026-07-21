@@ -92,7 +92,8 @@ export class PcbCache {
       schematicUuid: this.board?.schematic?.uuid || null,
       schematicName: this.board?.schematic?.name || null,
       componentCount: snapshot?.components?.length || 0,
-      padCount: snapshot?.components?.reduce((sum, item) => sum + (item.pads?.length || 0), 0) || 0,
+      padCount: (snapshot?.components?.reduce((sum, item) => sum + (item.pads?.length || 0), 0) || 0)
+        + (snapshot?.standalonePads?.length || 0),
       netCount: snapshot?.nets?.length || 0,
       trackCount: (snapshot?.tracks?.length || 0) + (snapshot?.trackArcs?.length || 0) + (snapshot?.trackPolylines?.length || 0),
       viaCount: snapshot?.vias?.length || 0,

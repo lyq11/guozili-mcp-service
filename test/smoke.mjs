@@ -43,9 +43,14 @@ const expected = [
   "schematic_create_texts",
   "schematic_run_drc",
   "pcb_list_boards",
+  "pcb_create_from_schematic",
   "pcb_inspect",
   "pcb_inspect_region",
   "pcb_check",
+  "pcb_find_board_outline",
+  "pcb_list_stackups",
+  "pcb_set_stackup",
+  "pcb_check_board_outline",
   "pcb_find_unrouted_nets",
   "pcb_check_component_overlaps",
   "pcb_check_outside_components",
@@ -53,8 +58,16 @@ const expected = [
   "pcb_run_drc",
   "pcb_apply_operations",
   "pcb_transform_components",
+  "pcb_group_components_by_schematic_page",
+  "pcb_create_board_outline",
+  "pcb_delete_board_outline",
+  "pcb_replace_board_outline",
   "pcb_create_tracks",
+  "pcb_modify_tracks",
   "pcb_create_vias",
+  "pcb_modify_vias",
+  "pcb_apply_net_track_policy",
+  "pcb_arrange_components",
   "pcb_create_pours",
   "pcb_rebuild_pours",
   "pcb_fix_deterministic",
@@ -122,13 +135,37 @@ if (!JSON.stringify(freeRegionsTool?.inputSchema).includes("clearance")) {
 }
 const pcbApplyTool = tools.tools.find((tool) => tool.name === "pcb_apply_operations");
 const pcbApplySchema = JSON.stringify(pcbApplyTool?.inputSchema);
-for (const operation of ["transform_components", "create_track", "create_via", "create_pour", "rebuild_pours", "import_schematic_changes"]) {
+for (const operation of ["transform_components", "create_board_outline", "create_track", "create_via", "modify_tracks", "modify_vias", "set_stackup", "create_pour", "rebuild_pours", "import_schematic_changes"]) {
   if (!pcbApplySchema.includes(operation)) throw new Error(`Missing PCB operation schema: ${operation}`);
 }
 const pcbTrackTool = tools.tools.find((tool) => tool.name === "pcb_create_tracks");
 if (!JSON.stringify(pcbTrackTool?.inputSchema).includes("width")) throw new Error("PCB tracks must require explicit width");
 const pcbViaTool = tools.tools.find((tool) => tool.name === "pcb_create_vias");
 if (!JSON.stringify(pcbViaTool?.inputSchema).includes("holeDiameter")) throw new Error("PCB vias must require explicit dimensions");
+const pcbCreateOutlineTool = tools.tools.find((tool) => tool.name === "pcb_create_board_outline");
+const pcbCreateOutlineSchema = JSON.stringify(pcbCreateOutlineTool?.inputSchema);
+if (!pcbCreateOutlineSchema.includes("rectangle") || !pcbCreateOutlineSchema.includes("polygon") || !pcbCreateOutlineSchema.includes("cornerRadius")) throw new Error("PCB outline creation must support rectangles, polygons, and rounded corners");
+const pcbModifyTrackTool = tools.tools.find((tool) => tool.name === "pcb_modify_tracks");
+if (!JSON.stringify(pcbModifyTrackTool?.inputSchema).includes("trackId")) throw new Error("PCB track modification must target primitive IDs");
+const pcbModifyViaTool = tools.tools.find((tool) => tool.name === "pcb_modify_vias");
+if (!JSON.stringify(pcbModifyViaTool?.inputSchema).includes("viaId")) throw new Error("PCB via modification must target primitive IDs");
+const pcbCreateTool = tools.tools.find((tool) => tool.name === "pcb_create_from_schematic");
+const pcbCreateSchema = JSON.stringify(pcbCreateTool?.inputSchema);
+if (!pcbCreateSchema.includes("schematicUuid") || !pcbCreateSchema.includes("stackup")) throw new Error("PCB creation must require a schematic UUID and support stackup settings");
+const pcbSetStackupTool = tools.tools.find((tool) => tool.name === "pcb_set_stackup");
+const pcbSetStackupSchema = JSON.stringify(pcbSetStackupTool?.inputSchema);
+if (!pcbSetStackupSchema.includes("copperLayerCount") || !pcbSetStackupSchema.includes("innerLayerNames") || !pcbSetStackupSchema.includes("physicalStackingConfigurationName")) throw new Error("PCB stackup setting must support layer counts, names, and saved configurations");
+const pcbNetPolicyTool = tools.tools.find((tool) => tool.name === "pcb_apply_net_track_policy");
+const pcbNetPolicySchema = JSON.stringify(pcbNetPolicyTool?.inputSchema);
+if (!pcbNetPolicySchema.includes("netNames") || !pcbNetPolicySchema.includes("matchMode") || !pcbNetPolicySchema.includes("apply")) throw new Error("PCB net track policy must support selectors and preview/apply");
+const pcbArrangeTool = tools.tools.find((tool) => tool.name === "pcb_arrange_components");
+const pcbArrangeSchema = JSON.stringify(pcbArrangeTool?.inputSchema);
+for (const operation of ["align", "distribute", "snap_to_grid"]) if (!pcbArrangeSchema.includes(operation)) throw new Error(`Missing PCB arrangement operation: ${operation}`);
+const pcbOutlineTool = tools.tools.find((tool) => tool.name === "pcb_check_board_outline");
+if (!JSON.stringify(pcbOutlineTool?.inputSchema).includes("tolerance")) throw new Error("PCB outline checking must expose tolerance");
+const pcbGroupTool = tools.tools.find((tool) => tool.name === "pcb_group_components_by_schematic_page");
+const pcbGroupSchema = JSON.stringify(pcbGroupTool?.inputSchema);
+if (!pcbGroupSchema.includes("apply") || !pcbGroupSchema.includes("groupGap")) throw new Error("PCB page grouping must support preview and spacing controls");
 
 // 发布构建可只验证工具契约，不要求 EasyEDA 此时已经加载最新版扩展。
 if (process.argv.includes("--tools-only")) {
@@ -148,7 +185,10 @@ for (let attempt = 0; attempt < 20; attempt += 1) {
 if (health.isError) throw new Error(health.content?.[0]?.text || "Health tool failed");
 const pages = await client.callTool({ name: "schematic_list_pages", arguments: {} });
 if (pages.isError) throw new Error(pages.content?.[0]?.text || "List pages failed");
-const firstPage = pages.structuredContent.pages[0];
+// 扁平 pages 还包含 [backup] 原理图页面，而工程缓存只服务 [main]；必须从主原理图选测试页。
+const mainSchematic = pages.structuredContent.schematics.find((schematic) => /\[main\]/i.test(schematic.name));
+const firstPage = mainSchematic?.pages?.[0];
+if (!firstPage) throw new Error("No [main] schematic page available for smoke test");
 const inspected = await client.callTool({
   name: "schematic_inspect_page",
   arguments: { pageUuid: firstPage.uuid, includeWires: false },
@@ -179,12 +219,19 @@ const largestComponentBounds = inspected.structuredContent.components
   }))
   .sort((left, right) => right.area - left.area)
   .slice(0, 10);
-const readabilityPage = pages.structuredContent.pages.find((page) => page.name.toLowerCase().includes("rs485")) || firstPage;
+const readabilityPage = mainSchematic.pages.find((page) => page.name.toLowerCase().includes("rs485")) || firstPage;
 const readability = await client.callTool({
   name: "schematic_analyze_readability",
   arguments: { pageUuid: readabilityPage.uuid },
 });
 if (readability.isError) throw new Error(readability.content?.[0]?.text || "Readability analysis failed");
+// PCB 冒烟只执行读取和本地分析，不运行 DRC 或任何写操作。
+const pcbBoards = await client.callTool({ name: "pcb_list_boards", arguments: {} });
+if (pcbBoards.isError) throw new Error(pcbBoards.content?.[0]?.text || "PCB board list failed");
+const pcbInspected = await client.callTool({ name: "pcb_inspect", arguments: { refresh: true } });
+if (pcbInspected.isError) throw new Error(pcbInspected.content?.[0]?.text || "PCB inspect failed");
+const pcbChecked = await client.callTool({ name: "pcb_check", arguments: { refresh: false } });
+if (pcbChecked.isError) throw new Error(pcbChecked.content?.[0]?.text || "PCB check failed");
 // 直接写工具会真实修改文档并触发会话备份，所以冒烟测试只检查它已注册，不自动调用。
 console.log(JSON.stringify({
   // 输出关键结构，便于人工查看当前连接和可读性分析是否正常。
@@ -205,6 +252,12 @@ console.log(JSON.stringify({
     page: readability.structuredContent.page,
     score: readability.structuredContent.score,
     metrics: readability.structuredContent.metrics,
+  },
+  pcb: {
+    active: pcbBoards.structuredContent.active,
+    board: pcbInspected.structuredContent.pcb,
+    counts: pcbInspected.structuredContent.counts,
+    checkCounts: pcbChecked.structuredContent.counts,
   },
   directWriteToolRegistered: names.includes("schematic_apply_operations"),
 }, null, 2));

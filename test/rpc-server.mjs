@@ -4,7 +4,11 @@ import WebSocket from "ws";
 import { EasyEdaRpcServer } from "../src/rpc-server.mjs";
 
 const token = "test-token";
-const rpc = new EasyEdaRpcServer({ portStart: 49720, portEnd: 49729, token, timeoutMs: 2_000 });
+const debugLines = [];
+const rpc = new EasyEdaRpcServer({
+  portStart: 49720, portEnd: 49729, token, timeoutMs: 2_000,
+  logger: (line) => debugLines.push(line),
+});
 await rpc.start();
 
 // 第一阶段：模拟入侵客户端使用错误令牌，服务器应以策略违规代码 1008 断开。
@@ -35,10 +39,16 @@ extension.on("message", (raw) => {
       token,
       windowId: "mock-window",
       capabilities: ["system.health"],
+      debug: true,
     }));
   } else if (message.type === "rpc") {
-    assert.equal(message.method, "system.health");
-    extension.send(JSON.stringify({ type: "result", id: message.id, result: { ok: true } }));
+    if (message.method === "system.health") {
+      extension.send(JSON.stringify({ type: "result", id: message.id, result: { ok: true } }));
+    } else if (message.method === "system.fail") {
+      extension.send(JSON.stringify({ type: "error", id: message.id, error: "mock failure" }));
+    } else {
+      extension.send(JSON.stringify({ type: "error", id: message.id, error: "unexpected method" }));
+    }
   }
 });
 
@@ -56,9 +66,14 @@ await new Promise((resolve, reject) => {
 
 // 验证 MCP 侧 call() 能收到模拟插件按同一请求 id 返回的结果。
 assert.deepEqual(await rpc.call("system.health"), { ok: true });
+await assert.rejects(() => rpc.call("system.fail"), /mock failure/);
 const status = await rpc.status();
 assert.equal(status.connectedWindows[0].windowId, "mock-window");
+assert.equal(status.connectedWindows[0].debug, true);
 assert.equal(status.protocolVersion, 1);
+assert.ok(debugLines.some((line) => line.includes(" rpc-call ") && line.includes("system.health")));
+assert.ok(debugLines.some((line) => line.includes(" rpc-result ") && line.includes('"ok":true')));
+assert.ok(debugLines.some((line) => line.includes(" rpc-error ") && line.includes("mock failure")));
 
 extension.close();
 rpc.close();

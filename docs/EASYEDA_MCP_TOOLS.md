@@ -451,8 +451,24 @@ MCP 会根据器件原点和 PIN 的画布绝对坐标补充布局信息：
 
 ## PCB 工具
 
+新增的高层 PCB 工具：
+
+- `pcb_create_from_schematic`：从指定原理图创建 PCB，建立 EasyEDA Board 关联，并可立即导入原理图器件。
+- `pcb_list_stackups`：读取当前/default 物理叠层、全部已保存叠层配置、铜层数和图层名称。
+- `pcb_set_stackup`：设置 2–32 层偶数铜层、按顺序命名内层或按配置名称/原始配置覆写当前物理叠层。简单层数和完整物理配置互斥，避免含义冲突。
+- `pcb_find_board_outline`：返回 Board Outline 层上的直线、圆弧、折线、图元 ID、数量与外包边界。
+- `pcb_check_board_outline`：按端点拓扑检查直线/圆弧闭合性，并单独报告折线的闭合状态、断点和分支点。
+- `pcb_create_board_outline`：在 Board Outline 层绘制矩形或多边形轮廓；闭合轮廓支持圆角，`closed=false` 的开放路径可用于补板框缺口。板框固定使用空网络，不复用铜走线操作。
+- `pcb_group_components_by_schematic_page`：将 PCB 器件按原理图页打组排布。默认 `apply=false` 只返回布局方案；显式设置 `apply=true` 才会移动器件并创建会话 PCB 备份。
+- `pcb_modify_tracks`：按走线图元 ID 原地修改线宽、铜层、网络或锁定状态，并保留图元 ID。
+- `pcb_modify_vias`：按过孔图元 ID 原地修改位置、孔径、外径、类型、网络或锁定状态，并保留图元 ID。
+- `pcb_apply_net_track_policy`：按精确网络名或 glob 匹配网络，对其全部直线、圆弧和折线走线统一设置线宽、层或锁定状态；默认 `apply=false` 仅预览。
+- `pcb_arrange_components`：对指定器件顺序执行左/右/上/下/中心对齐、水平/垂直等边缘间距和栅格吸附；默认 `apply=false` 仅预览。
+
 - 缓存与读取：`pcb_list_boards`、`pcb_inspect`、`pcb_inspect_region`。
-- 检查：`pcb_check`、`pcb_find_unrouted_nets`、`pcb_check_component_overlaps`、`pcb_check_outside_components`、`pcb_check_schematic_consistency`、`pcb_run_drc`。
+- 检查：`pcb_check`、`pcb_find_unrouted_nets`、`pcb_find_dangling_tracks`、`pcb_check_component_overlaps`、`pcb_check_outside_components`、`pcb_check_schematic_consistency`、`pcb_run_drc`。
+- 清理：`pcb_delete_dangling_tracks` 会在写入前重新扫描并删除未接触焊盘或过孔的游离直线走线岛；默认跳过含铺铜、圆弧/折线走线的网络和锁定导线。
+- 创建：`pcb_create_pours`、`pcb_create_vias`、`pcb_create_pads` 分别创建铺铜、过孔和独立焊盘；不推断网络、电气层或制造尺寸。
 - 安全写入：`pcb_transform_components`、`pcb_create_tracks`、`pcb_create_vias`、`pcb_create_pours`、`pcb_rebuild_pours`、`pcb_sync_from_schematic`。
 - `pcb_fix_deterministic` 会先运行 DRC，再重建指定或全部铺铜，最后再次运行 DRC；不会自动修改线宽、间距、过孔或高电流网络规则。
 - 所有 PCB 坐标和尺寸均使用 mil。走线层/线宽、过孔孔径/外径、铺铜层/边界宽度及网络必须显式提供。

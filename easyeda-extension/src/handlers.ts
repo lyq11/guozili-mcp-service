@@ -1,3 +1,11 @@
+import { standalonePadIds } from './pad-classification';
+import { PCB_OPERATIONS, PcbOperationContext } from './pcb-operations';
+import {
+  polygonSource, primitiveBBox, serializePcbArc, serializePcbLine, serializePcbPad,
+  serializePcbPolyline, serializePcbPour, serializePcbVia, PrimitiveBounds,
+} from './pcb-serialize';
+import { applyPcbStackupSettings } from './pcb-stackup';
+
 // EasyEDA 插件侧的白名单 RPC 实现。
 // 此文件是实际读取和修改当前编辑器文档的边界，MCP 本身不直接调用 EasyEDA API。
 type JsonObject = Record<string, unknown>;
@@ -139,37 +147,66 @@ async function listPcbBoards(): Promise<unknown> {
   };
 }
 
-function polygonSource(polygon: any): unknown {
-  try { return polygon?.getSource?.() ?? null; } catch { return null; }
-}
-
-async function primitiveBBox(primitiveId: string): Promise<PrimitiveBounds | undefined> {
-  try { return await eda.pcb_Primitive.getPrimitivesBBox([primitiveId]); }
-  catch { return undefined; }
-}
-
-async function serializePcbPad(pad: any): Promise<JsonObject> {
-  const id = pad.getState_PrimitiveId();
+async function listPcbStackups(params: JsonObject): Promise<unknown> {
+  const pcbUuid = stringParam(params, 'pcbUuid');
+  await openPcb(pcbUuid);
   return {
-    id,
-    parentComponentId: pad.getState_ParentComponentPrimitiveId?.() || null,
-    number: pad.getState_PadNumber(),
-    net: pad.getState_Net() || '',
-    layer: pad.getState_Layer(),
-    x: pad.getState_X(),
-    y: pad.getState_Y(),
-    rotation: pad.getState_Rotation(),
-    pad: pad.getState_Pad(),
-    hole: pad.getState_Hole(),
-    padType: pad.getState_PadType(),
-    locked: pad.getState_PrimitiveLock(),
-    bbox: await primitiveBBox(id),
+    pcbUuid,
+    copperLayerCount: await eda.pcb_Layer.getTheNumberOfCopperLayers(),
+    currentName: await eda.pcb_Layer.getCurrentPhysicalStackingConfigurationName(),
+    defaultName: await eda.pcb_Layer.getDefaultPhysicalStackingConfigurationName(),
+    currentConfiguration: eda.pcb_Layer.getCurrentPhysicalStackingConfiguration(),
+    configurations: await eda.pcb_Layer.getAllPhysicalStackingConfigurations(),
+    layers: await eda.pcb_Layer.getAllLayers(),
   };
 }
 
-async function serializePcbComponent(component: any): Promise<JsonObject> {
+async function createPcbFromSchematic(params: JsonObject): Promise<unknown> {
+  const schematicUuid = stringParam(params, 'schematicUuid');
+  const schematics = await eda.dmt_Schematic.getAllSchematicsInfo();
+  const schematic = schematics.find(item => item.uuid === schematicUuid);
+  if (!schematic) throw new Error(`Schematic not found: ${schematicUuid}`);
+  if (/\[backup\]/i.test(String(schematic.name || ''))) throw new Error('Cannot create a PCB from a [backup] schematic');
+  const existingBoards = await eda.dmt_Board.getAllBoardsInfo();
+  const existing = existingBoards.find(item => item.schematic?.uuid === schematicUuid);
+  if (existing?.pcb?.uuid) throw new Error(`Schematic already has an associated PCB: ${existing.pcb.uuid}`);
+
+  let pcbUuid: string | undefined;
+  let boardName: string | undefined;
+  try {
+    pcbUuid = await eda.dmt_Pcb.createPcb();
+    if (!pcbUuid) throw new Error('PCB creation failed');
+    if (params.pcbName !== undefined) {
+      const pcbName = stringParam(params, 'pcbName');
+      if (!await eda.dmt_Pcb.modifyPcbName(pcbUuid, pcbName)) throw new Error(`Unable to name PCB ${pcbUuid}`);
+    }
+    boardName = await eda.dmt_Board.createBoard(schematicUuid, pcbUuid);
+    if (!boardName) throw new Error('Board association creation failed');
+    const opened = await eda.dmt_EditorControl.openDocument(pcbUuid);
+    if (!opened) throw new Error(`Unable to open new PCB ${pcbUuid}`);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const stackup = params.stackup === undefined ? null : await applyPcbStackupSettings(params.stackup);
+    let imported = false;
+    if (params.importChanges !== false) {
+      imported = await eda.pcb_Document.importChanges(schematicUuid);
+      if (!imported) throw new Error('Importing schematic components into the new PCB failed');
+    }
+    if (!await eda.pcb_Document.save()) throw new Error('Saving the new PCB failed');
+    const boards = await eda.dmt_Board.getAllBoardsInfo();
+    const board = boards.find(item => item.pcb?.uuid === pcbUuid || item.name === boardName);
+    return { success: true, sessionId: params.sessionId || null, reason: params.reason || null, schematicUuid, pcbUuid, boardName, imported, stackup, board: board ? boardSummary(board) : null };
+  } catch (error) {
+    try {
+      if (boardName) await eda.dmt_Board.deleteBoard(boardName);
+      else if (pcbUuid) await eda.dmt_Pcb.deletePcb(pcbUuid);
+    } catch {}
+    throw error;
+  }
+}
+
+async function serializePcbComponent(component: any, knownPads?: any[]): Promise<JsonObject> {
   const id = component.getState_PrimitiveId();
-  const pads = await component.getAllPins() || [];
+  const pads = knownPads || await component.getAllPins() || [];
   return {
     id,
     designator: component.getState_Designator() || null,
@@ -193,57 +230,13 @@ async function serializePcbComponent(component: any): Promise<JsonObject> {
   };
 }
 
-function serializePcbLine(line: any): JsonObject {
-  return {
-    id: line.getState_PrimitiveId(), net: line.getState_Net() || '', layer: line.getState_Layer(),
-    startX: line.getState_StartX(), startY: line.getState_StartY(),
-    endX: line.getState_EndX(), endY: line.getState_EndY(),
-    width: line.getState_LineWidth(), locked: line.getState_PrimitiveLock(),
-  };
-}
-
-function serializePcbArc(arc: any): JsonObject {
-  return {
-    id: arc.getState_PrimitiveId(), net: arc.getState_Net() || '', layer: arc.getState_Layer(),
-    startX: arc.getState_StartX(), startY: arc.getState_StartY(),
-    endX: arc.getState_EndX(), endY: arc.getState_EndY(), angle: arc.getState_ArcAngle(),
-    width: arc.getState_LineWidth(), locked: arc.getState_PrimitiveLock(),
-  };
-}
-
-async function serializePcbPolyline(polyline: any): Promise<JsonObject> {
-  const id = polyline.getState_PrimitiveId();
-  return {
-    id, net: polyline.getState_Net() || '', layer: polyline.getState_Layer(),
-    polygon: polygonSource(polyline.getState_Polygon()), width: polyline.getState_LineWidth(),
-    locked: polyline.getState_PrimitiveLock(), bbox: await primitiveBBox(id),
-  };
-}
-
-function serializePcbVia(via: any): JsonObject {
-  return {
-    id: via.getState_PrimitiveId(), net: via.getState_Net() || '', x: via.getState_X(), y: via.getState_Y(),
-    holeDiameter: via.getState_HoleDiameter(), diameter: via.getState_Diameter(),
-    viaType: via.getState_ViaType(), designRuleBlindViaName: via.getState_DesignRuleBlindViaName(),
-    solderMaskExpansion: via.getState_SolderMaskExpansion(), locked: via.getState_PrimitiveLock(),
-  };
-}
-
-function serializePcbPour(pour: any): JsonObject {
-  return {
-    id: pour.getState_PrimitiveId(), net: pour.getState_Net() || '', layer: pour.getState_Layer(),
-    polygon: polygonSource(pour.getState_ComplexPolygon()), fillMethod: pour.getState_PourFillMethod(),
-    preserveSilos: pour.getState_PreserveSilos(), name: pour.getState_PourName(),
-    priority: pour.getState_PourPriority(), width: pour.getState_LineWidth(), locked: pour.getState_PrimitiveLock(),
-  };
-}
-
 async function inspectPcb(params: JsonObject): Promise<unknown> {
   const pcbUuid = stringParam(params, 'pcbUuid');
   const board = await openPcb(pcbUuid);
-  const [layers, components, nets, lines, arcs, polylines, vias, pours, poured, regions, ruleName, ruleConfiguration, netRules, netByNetRules, regionRules, stackingName] = await Promise.all([
+  const [layers, components, standalonePads, nets, lines, arcs, polylines, vias, pours, poured, regions, ruleName, ruleConfiguration, netRules, netByNetRules, regionRules, stackingName] = await Promise.all([
     eda.pcb_Layer.getAllLayers(),
     eda.pcb_PrimitiveComponent.getAll(),
+    eda.pcb_PrimitivePad.getAll(),
     eda.pcb_Net.getAllNets(),
     eda.pcb_PrimitiveLine.getAll(),
     eda.pcb_PrimitiveArc.getAll(),
@@ -262,13 +255,19 @@ async function inspectPcb(params: JsonObject): Promise<unknown> {
   const serializedLines = lines.map(serializePcbLine);
   const serializedArcs = arcs.map(serializePcbArc);
   const serializedPolylines = await Promise.all(polylines.map(serializePcbPolyline));
+  const componentPadGroups = await Promise.all(components.map(component => component.getAllPins()));
+  const standaloneIds = standalonePadIds(
+    standalonePads.map(pad => pad.getState_PrimitiveId()),
+    componentPadGroups.map(pads => pads.map(pad => pad.getState_PrimitiveId())),
+  );
   const copperLayerIds = new Set(layers.filter(item => item.type === 'SIGNAL' || item.type === 'PLANE').map(item => Number(item.id)));
   return {
     board: boardSummary(board),
     unit: 'mil',
     layers,
     stacking: { name: stackingName, configuration: eda.pcb_Layer.getCurrentPhysicalStackingConfiguration() },
-    components: await Promise.all(components.map(serializePcbComponent)),
+    components: await Promise.all(components.map((component, index) => serializePcbComponent(component, componentPadGroups[index]))),
+    standalonePads: await Promise.all(standalonePads.filter(pad => standaloneIds.has(pad.getState_PrimitiveId())).map(serializePcbPad)),
     nets,
     tracks: serializedLines.filter(line => copperLayerIds.has(Number(line.layer))),
     trackArcs: serializedArcs.filter(arc => copperLayerIds.has(Number(arc.layer))),
@@ -318,16 +317,35 @@ async function runPcbDrc(params: JsonObject): Promise<unknown> {
   return { pcbUuid, result };
 }
 
-const ALLOWED_PCB_OPERATIONS = new Set([
-  'transform_components', 'create_track', 'create_via', 'create_pour', 'rebuild_pours', 'import_schematic_changes',
-]);
-
-function finiteNumber(value: unknown): boolean {
-  return typeof value === 'number' && Number.isFinite(value);
-}
-
-function positiveNumber(value: unknown): boolean {
-  return finiteNumber(value) && Number(value) > 0;
+async function buildPcbOperationContext(board: any): Promise<PcbOperationContext> {
+  const [components, nets, layers, lines, arcs, polylines, vias, pours] = await Promise.all([
+    eda.pcb_PrimitiveComponent.getAll(), eda.pcb_Net.getAllNets(), eda.pcb_Layer.getAllLayers(),
+    eda.pcb_PrimitiveLine.getAll(), eda.pcb_PrimitiveArc.getAll(), eda.pcb_PrimitivePolyline.getAll(),
+    eda.pcb_PrimitiveVia.getAll(), eda.pcb_PrimitivePour.getAll(),
+  ]);
+  const copperLayerIds = new Set(layers.filter(item => item.type === 'SIGNAL' || item.type === 'PLANE').map(item => Number(item.id)));
+  const copperLineIds = new Set(lines.filter(item => copperLayerIds.has(Number(item.getState_Layer()))).map(item => item.getState_PrimitiveId()));
+  const boardOutlineIds = new Set([
+    ...lines.filter(item => Number(item.getState_Layer()) === 11).map(item => item.getState_PrimitiveId()),
+    ...arcs.filter(item => Number(item.getState_Layer()) === 11).map(item => item.getState_PrimitiveId()),
+    ...polylines.filter(item => Number(item.getState_Layer()) === 11).map(item => item.getState_PrimitiveId()),
+  ]);
+  return {
+    board,
+    componentIds: new Set(components.map(item => item.getState_PrimitiveId())),
+    netNames: new Set(nets.map(item => typeof item === 'string' ? item : String((item as any).name || (item as any).net || ''))),
+    layerIds: new Set(layers.map(item => Number(item.id))),
+    copperLayerIds,
+    copperLineIds,
+    boardOutlineIds,
+    copperTrackIds: new Set([
+      ...copperLineIds,
+      ...arcs.filter(item => copperLayerIds.has(Number(item.getState_Layer()))).map(item => item.getState_PrimitiveId()),
+      ...polylines.filter(item => copperLayerIds.has(Number(item.getState_Layer()))).map(item => item.getState_PrimitiveId()),
+    ]),
+    viaById: new Map(vias.map(item => [item.getState_PrimitiveId(), item])),
+    pourIds: new Set(pours.map(item => item.getState_PrimitiveId())),
+  };
 }
 
 async function validatePcbOperations(params: JsonObject): Promise<unknown> {
@@ -344,18 +362,12 @@ async function validatePcbOperations(params: JsonObject): Promise<unknown> {
     return { valid: false, findings };
   }
 
-  const [components, nets, layers, pours] = await Promise.all([
-    eda.pcb_PrimitiveComponent.getAll(), eda.pcb_Net.getAllNets(), eda.pcb_Layer.getAllLayers(), eda.pcb_PrimitivePour.getAll(),
-  ]);
-  const componentIds = new Set(components.map(item => item.getState_PrimitiveId()));
-  const netNames = new Set(nets.map(item => typeof item === 'string' ? item : String((item as any).name || (item as any).net || '')));
-  const layerIds = new Set(layers.map(item => Number(item.id)));
-  const copperLayerIds = new Set(layers.filter(item => item.type === 'SIGNAL' || item.type === 'PLANE').map(item => Number(item.id)));
-  const pourIds = new Set(pours.map(item => item.getState_PrimitiveId()));
+  const ctx = await buildPcbOperationContext(board);
 
   operations.forEach((operation, index) => {
     const type = String(operation.type || '');
-    if (!ALLOWED_PCB_OPERATIONS.has(type)) {
+    const definition = PCB_OPERATIONS[type];
+    if (!definition) {
       findings.push({ index, level: 'error', message: 'Unsupported PCB operation', type });
       return;
     }
@@ -363,56 +375,7 @@ async function validatePcbOperations(params: JsonObject): Promise<unknown> {
       findings.push({ index, level: 'error', message: 'Operation targets a different PCB', pcbUuid: operation.pcbUuid });
       return;
     }
-    if (type === 'transform_components') {
-      const changes = operation.changes as unknown;
-      if (!Array.isArray(changes) || changes.length < 1 || changes.length > 100) {
-        findings.push({ index, level: 'error', message: 'changes must contain 1-100 component transformations' });
-        return;
-      }
-      const seen = new Set<string>();
-      for (const raw of changes) {
-        const change = raw as JsonObject;
-        const id = String(change.componentId || '');
-        if (!componentIds.has(id)) findings.push({ index, level: 'error', message: 'PCB component not found', id });
-        if (seen.has(id)) findings.push({ index, level: 'error', message: 'PCB component appears more than once', id });
-        seen.add(id);
-        if (![change.x, change.y, change.rotation].some(value => value !== undefined) && change.locked === undefined) {
-          findings.push({ index, level: 'error', message: 'Transformation must include x, y, rotation, or locked', id });
-        }
-        for (const key of ['x', 'y', 'rotation']) {
-          if (change[key] !== undefined && !finiteNumber(change[key])) findings.push({ index, level: 'error', message: `${key} must be finite`, id });
-        }
-        if (change.locked !== undefined && typeof change.locked !== 'boolean') findings.push({ index, level: 'error', message: 'locked must be boolean', id });
-      }
-    } else if (type === 'create_track') {
-      if (!netNames.has(String(operation.net || ''))) findings.push({ index, level: 'error', message: 'PCB net not found', net: operation.net });
-      if (!layerIds.has(Number(operation.layer)) || !copperLayerIds.has(Number(operation.layer))) findings.push({ index, level: 'error', message: 'Routing layer must be an enabled copper layer', layer: operation.layer });
-      for (const key of ['startX', 'startY', 'endX', 'endY']) if (!finiteNumber(operation[key])) findings.push({ index, level: 'error', message: `${key} must be finite` });
-      if (!positiveNumber(operation.width)) findings.push({ index, level: 'error', message: 'Track width must be explicitly positive' });
-    } else if (type === 'create_via') {
-      if (!netNames.has(String(operation.net || ''))) findings.push({ index, level: 'error', message: 'PCB net not found', net: operation.net });
-      if (!finiteNumber(operation.x) || !finiteNumber(operation.y)) findings.push({ index, level: 'error', message: 'Via x/y must be finite' });
-      if (!positiveNumber(operation.holeDiameter) || !positiveNumber(operation.diameter)
-        || Number(operation.diameter) <= Number(operation.holeDiameter)) {
-        findings.push({ index, level: 'error', message: 'Via diameter must be greater than its positive hole diameter' });
-      }
-    } else if (type === 'create_pour') {
-      if (!netNames.has(String(operation.net || ''))) findings.push({ index, level: 'error', message: 'PCB net not found', net: operation.net });
-      if (!layerIds.has(Number(operation.layer)) || !copperLayerIds.has(Number(operation.layer))) findings.push({ index, level: 'error', message: 'Pour layer must be an enabled copper layer', layer: operation.layer });
-      if (!Array.isArray(operation.polygon) || !eda.pcb_MathPolygon.createPolygon(operation.polygon as any)) {
-        findings.push({ index, level: 'error', message: 'Invalid EasyEDA polygon source' });
-      }
-      if (!positiveNumber(operation.width)) findings.push({ index, level: 'error', message: 'Pour line width must be explicitly positive' });
-    } else if (type === 'rebuild_pours' && Array.isArray(operation.pourIds)) {
-      for (const id of operation.pourIds) if (!pourIds.has(String(id))) findings.push({ index, level: 'error', message: 'Pour not found', id });
-    } else if (type === 'import_schematic_changes') {
-      // openPcb already proves the target PCB belongs to the [main] schematic Board.
-      if (operation.schematicUuid !== undefined && typeof operation.schematicUuid !== 'string') {
-        findings.push({ index, level: 'error', message: 'schematicUuid must be a string when provided' });
-      } else if (operation.schematicUuid && operation.schematicUuid !== board.schematic?.uuid) {
-        findings.push({ index, level: 'error', message: 'Only the associated [main] schematic can be imported', schematicUuid: operation.schematicUuid });
-      }
-    }
+    definition.validate(operation, index, ctx, findings);
   });
   return { valid: !findings.some(item => item.level === 'error'), findings, pcbUuid };
 }
@@ -459,56 +422,9 @@ async function applyPcbOperations(params: JsonObject): Promise<unknown> {
   for (let index = 0; index < operations.length; index += 1) {
     const operation = operations[index];
     const type = String(operation.type);
-    let value: unknown;
-    if (type === 'transform_components') {
-      const transformed = [];
-      for (const change of operation.changes as JsonObject[]) {
-        const id = String(change.componentId);
-        const beforeItem = await eda.pcb_PrimitiveComponent.get(id);
-        if (!beforeItem || Array.isArray(beforeItem)) throw new Error(`PCB component not found: ${id}`);
-        const before = { x: beforeItem.getState_X(), y: beforeItem.getState_Y(), rotation: beforeItem.getState_Rotation(), locked: beforeItem.getState_PrimitiveLock() };
-        const item = await eda.pcb_PrimitiveComponent.modify(id, {
-          x: change.x === undefined ? before.x : Number(change.x),
-          y: change.y === undefined ? before.y : Number(change.y),
-          rotation: change.rotation === undefined ? before.rotation : Number(change.rotation),
-          primitiveLock: change.locked === undefined ? before.locked : change.locked === true,
-        });
-        if (!item) throw new Error(`PCB component transformation failed: ${id}`);
-        transformed.push({ id, designator: item.getState_Designator(), before, after: { x: item.getState_X(), y: item.getState_Y(), rotation: item.getState_Rotation(), locked: item.getState_PrimitiveLock() } });
-      }
-      value = { components: transformed };
-    } else if (type === 'create_track') {
-      const item = await eda.pcb_PrimitiveLine.create(String(operation.net), Number(operation.layer) as any,
-        Number(operation.startX), Number(operation.startY), Number(operation.endX), Number(operation.endY), Number(operation.width), operation.locked === true);
-      if (!item) throw new Error('Track creation failed');
-      value = serializePcbLine(item);
-    } else if (type === 'create_via') {
-      const item = await eda.pcb_PrimitiveVia.create(String(operation.net), Number(operation.x), Number(operation.y),
-        Number(operation.holeDiameter), Number(operation.diameter), operation.viaType as any, null, null, operation.locked === true);
-      if (!item) throw new Error('Via creation failed');
-      value = serializePcbVia(item);
-    } else if (type === 'create_pour') {
-      const polygon = eda.pcb_MathPolygon.createPolygon(operation.polygon as any);
-      if (!polygon) throw new Error('Pour polygon creation failed');
-      const item = await eda.pcb_PrimitivePour.create(String(operation.net), Number(operation.layer) as any, polygon,
-        operation.fillMethod as any, operation.preserveSilos !== false, operation.name ? String(operation.name) : undefined,
-        operation.priority === undefined ? undefined : Number(operation.priority), Number(operation.width), operation.locked === true);
-      if (!item) throw new Error('Pour creation failed');
-      value = serializePcbPour(item);
-    } else if (type === 'rebuild_pours') {
-      const requested = Array.isArray(operation.pourIds) ? new Set(operation.pourIds.map(String)) : null;
-      const pours = (await eda.pcb_PrimitivePour.getAll()).filter(item => !requested || requested.has(item.getState_PrimitiveId()));
-      const rebuilt = [];
-      for (const pour of pours) {
-        const poured = await pour.rebuildCopperRegion();
-        rebuilt.push({ pourId: pour.getState_PrimitiveId(), pouredId: poured?.getState_PrimitiveId() || null });
-      }
-      value = { rebuilt };
-    } else if (type === 'import_schematic_changes') {
-      const imported = await eda.pcb_Document.importChanges(operation.schematicUuid ? String(operation.schematicUuid) : undefined);
-      if (!imported) throw new Error('Importing schematic changes into PCB failed');
-      value = { imported: true, schematicUuid: operation.schematicUuid || null };
-    } else throw new Error(`Unsupported PCB operation: ${type}`);
+    const definition = PCB_OPERATIONS[type];
+    if (!definition) throw new Error(`Unsupported PCB operation: ${type}`);
+    const value = await definition.apply(operation);
     if (!await eda.pcb_Document.save()) throw new Error(`PCB save failed after ${type}`);
     results.push({ index, type, value });
   }
@@ -527,8 +443,6 @@ async function getComponentBBox(componentId: string): Promise<{minX: number; min
     return undefined;
   }
 }
-
-type PrimitiveBounds = {minX: number; minY: number; maxX: number; maxY: number};
 
 /** Build a local collision rectangle when EasyEDA's beta BBox API incorrectly stretches to page origin. */
 async function getComponentCollisionBBox(component: any): Promise<PrimitiveBounds | undefined> {
@@ -1294,6 +1208,8 @@ const handlers: Record<string, (params: JsonObject) => Promise<unknown>> = {
   'operations.apply': applyOperations,
   'schematic.runDrc': runDrc,
   'pcb.listBoards': listPcbBoards,
+  'pcb.create': createPcbFromSchematic,
+  'pcb.stackups.list': listPcbStackups,
   'pcb.inspect': inspectPcb,
   'pcb.inspectRegion': inspectPcbRegion,
   'pcb.runDrc': runPcbDrc,
