@@ -11,6 +11,7 @@ export const CAPABILITIES = [
   'schematic.listPages',
   'schematic.inspectPage',
   'library.searchComponents',
+  'operations.validate',
   'operations.apply',
   'schematic.runDrc',
 ] as const;

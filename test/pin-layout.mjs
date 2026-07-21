@@ -62,6 +62,8 @@ const leftPort = planPortForPin({
 assert.deepEqual(leftPort.port, { x: 30, y: 90, rotation: 0 });
 assert.deepEqual(leftPort.line, [60, 90, 30, 90]);
 assert.equal(leftPort.side, "left");
+assert.equal(leftPort.routing.strategy, "direct");
+assert.equal(leftPort.routing.clear, true);
 
 const bottomPort = planPortForPin({
   id: "U2", x: 100, y: 100, pins: [{ number: "5", x: 110, y: 140 }],
@@ -70,6 +72,61 @@ assert.deepEqual(bottomPort.port, { x: 110, y: 160, rotation: 90 });
 assert.deepEqual(bottomPort.line, [110, 140, 110, 160]);
 assert.throws(() => planPortForPin({ id: "U1", x: 0, y: 0, pins: [] }, "1"), /not found/);
 assert.throws(() => planPortForPin({ id: "U1", x: 0, y: 0, pins: [] }, "1", { offset: 0 }), TypeError);
+
+const obstacleAwareComponent = {
+  id: "U4", x: 100, y: 100, pins: [{ number: "1", x: 60, y: 100 }],
+};
+const componentDetour = planPortForPin(obstacleAwareComponent, "1", {
+  offset: 40,
+  obstacles: {
+    components: [obstacleAwareComponent, { id: "U5", type: "part", x: 30, y: 100, pins: [] }],
+    wires: [],
+  },
+});
+assert.equal(componentDetour.routing.strategy, "detour");
+assert.equal(componentDetour.routing.blockingComponents, 0);
+assert.equal(componentDetour.routing.wireCrossings, 0);
+assert.deepEqual(componentDetour.line, [60, 100, 50, 100, 50, 60, 20, 60]);
+
+const rectangularPort = planPortForPin({
+  ...obstacleAwareComponent,
+  bbox: { minX: 60, minY: 80, maxX: 120, maxY: 120 },
+}, "1", {
+  offset: 40,
+  net: "LONG_NET_NAME",
+  direction: "OUT",
+  obstacles: {
+    components: [{
+      ...obstacleAwareComponent,
+      bbox: { minX: 60, minY: 80, maxX: 120, maxY: 120 },
+    }],
+    wires: [],
+  },
+});
+assert.equal(rectangularPort.routing.strategy, "extended-direct");
+assert.ok(rectangularPort.portBounds.right < 50, "the complete port rectangle must clear the source component");
+
+const wireDetour = planPortForPin(obstacleAwareComponent, "1", {
+  offset: 40,
+  obstacles: {
+    components: [obstacleAwareComponent],
+    wires: [{ id: "W1", line: [40, 80, 40, 120] }],
+  },
+});
+assert.equal(wireDetour.routing.strategy, "detour");
+assert.equal(wireDetour.routing.wireCrossings, 0);
+assert.deepEqual(wireDetour.port, { x: 20, y: 60, rotation: 0 });
+
+assert.throws(() => planPortForPin(obstacleAwareComponent, "1", {
+  offset: 40,
+  obstacles: {
+    components: [
+      obstacleAwareComponent,
+      { id: "BLOCK", x: 0, y: 100, pins: [{ x: -200, y: -100 }, { x: 80, y: 300 }] },
+    ],
+    wires: [],
+  },
+}), /No clear outward port route/);
 
 const annotated = annotatePagePinLayouts({
   page: { uuid: "page-1" },

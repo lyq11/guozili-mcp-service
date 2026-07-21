@@ -9,10 +9,16 @@ import { EasyEdaRpcServer } from "./rpc-server.mjs";
 import { summarizeOperations, WriteCoordinator } from "./transactions.mjs";
 import { analyzeReadability } from "./readability.mjs";
 import { annotatePagePinLayouts, planPortForPin } from "./pin-layout.mjs";
+import { OCCUPANCY, PageOccupancyCache } from "./page-occupancy.mjs";
+import { ProjectCache } from "./project-cache.mjs";
 
 // bridge 管理插件连接；writes 提供会话 ID 和写入串行化。
 const bridge = new EasyEdaRpcServer();
 const writes = new WriteCoordinator();
+const pageOccupancy = new PageOccupancyCache();
+const projectCache = new ProjectCache(bridge);
+bridge.onRegistration(() => projectCache.initialize({ force: true }));
+bridge.onDisconnection(() => projectCache.clear());
 // 先占用本地端口，再启动 MCP stdio，插件可以随时连接。
 await bridge.start();
 
@@ -26,6 +32,7 @@ const rotationSchema = z.union([z.literal(0), z.literal(90), z.literal(180), z.l
 
 // 所有写操作必须先通过此白名单 Schema；MCP 不接受任意 EasyEDA JavaScript。
 const operationSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("rename_schematic"), schematicUuid: z.string(), name: z.string().min(1).max(80) }),
   z.object({ type: z.literal("rename_page"), pageUuid: z.string(), name: z.string().min(1).max(80) }),
   z.object({ type: z.literal("delete_page"), pageUuid: z.string() }),
   z.object({
@@ -33,6 +40,7 @@ const operationSchema = z.discriminatedUnion("type", [
     pageUuid: z.string(),
     componentIds: z.array(z.string()).default([]),
     wireIds: z.array(z.string()).default([]),
+    textIds: z.array(z.string()).default([]),
   }),
   z.object({
     type: z.literal("create_component"),
@@ -52,6 +60,20 @@ const operationSchema = z.discriminatedUnion("type", [
     componentId: z.string().min(1),
     x: z.number(),
     y: z.number(),
+  }),
+  z.object({
+    type: z.literal("transform_components"),
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      componentId: z.string().min(1),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      rotation: rotationSchema.optional(),
+      mirror: z.boolean().optional(),
+    }).refine(
+      (change) => change.x !== undefined || change.y !== undefined || change.rotation !== undefined || change.mirror !== undefined,
+      "Each transformation must include x, y, rotation, or mirror",
+    )).min(1).max(50),
   }),
   z.object({
     type: z.literal("translate_group"),
@@ -94,6 +116,33 @@ const operationSchema = z.discriminatedUnion("type", [
     rotation: rotationSchema.default(0),
   }),
   z.object({
+    type: z.literal("set_no_connects"),
+    pageUuid: z.string().min(1),
+    componentId: z.string().min(1),
+    pinNumbers: z.array(z.string().min(1)).min(1).max(100),
+    noConnected: z.boolean().default(true),
+  }),
+  z.object({
+    type: z.literal("set_component_attribute"),
+    pageUuid: z.string().min(1),
+    componentId: z.string().min(1),
+    key: z.string().min(1).max(100),
+    value: z.string().max(500),
+    keyVisible: z.boolean().default(false),
+    valueVisible: z.boolean().default(true),
+  }),
+  z.object({
+    type: z.literal("set_net_label"),
+    pageUuid: z.string().min(1),
+    labelId: z.string().min(1),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    net: z.string().min(1).max(200).optional(),
+  }).refine(
+    (change) => change.x !== undefined || change.y !== undefined || change.net !== undefined,
+    "A net-label change must include x, y, or net",
+  ),
+  z.object({
     type: z.literal("create_port_for_pin"),
     pageUuid: z.string(),
     componentId: z.string().min(1),
@@ -117,7 +166,7 @@ const operationSchema = z.discriminatedUnion("type", [
 
 // instructions 会随 MCP 初始化提供给客户端，说明推荐的安全调用顺序。
 const server = new McpServer(
-  { name: "guozili-mcp-service", version: "0.4.2" },
+  { name: "guozili-mcp-service", version: "0.4.20" },
   {
     instructions: [
       "Inspect pages and components before proposing writes.",
@@ -155,9 +204,10 @@ server.registerTool(
   async () => {
     try {
       // context 来自插件中的当前编辑器状态，connection 来自 MCP 本地网关。
-      const context = await bridge.call("system.health");
+      await projectCache.ensureContext();
+      const context = projectCache.context;
       const connection = await bridge.status();
-      return toolResult({ connection, context });
+      return toolResult({ connection, context, cache: projectCache.status() });
     } catch (error) {
       return toolError(error);
     }
@@ -169,7 +219,7 @@ server.registerTool(
   "schematic_list_pages",
   { description: "List every schematic and page in the open EasyEDA project, even when no page is currently open." },
   async () => {
-    try { return toolResult(await bridge.call("schematic.listPages")); }
+    try { return toolResult(await projectCache.getCatalog()); }
     catch (error) { return toolError(error); }
   },
 );
@@ -178,7 +228,7 @@ server.registerTool(
 server.registerTool(
   "schematic_inspect_page",
   {
-    description: "Read components, pins, positions, nets, and optionally wires from one schematic page.",
+    description: "Read components, pins, positions, native net labels, nets, and optionally wires from one schematic page.",
     inputSchema: {
       pageUuid: z.string().min(1),
       includeWires: z.boolean().default(true),
@@ -186,9 +236,24 @@ server.registerTool(
   },
   async ({ pageUuid, includeWires }) => {
     try {
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires });
+      const page = await projectCache.getPage(pageUuid, { includeWires });
       return toolResult(annotatePagePinLayouts(page));
     }
+    catch (error) { return toolError(error); }
+  },
+);
+
+server.registerTool(
+  "schematic_get_component_inventory",
+  {
+    description: "Read the cached project-wide component inventory, grouped by model identity or sourcing fields, to find normalization candidates and inconsistent attributes.",
+    inputSchema: {
+      groupBy: z.enum(["model", "equivalentSpec", "deviceUuid", "manufacturerPart", "supplierPart", "name"]).default("model"),
+      includeSingletons: z.boolean().default(false),
+    },
+  },
+  async ({ groupBy, includeSingletons }) => {
+    try { return toolResult(await projectCache.getComponentInventory({ groupBy, includeSingletons })); }
     catch (error) { return toolError(error); }
   },
 );
@@ -211,7 +276,7 @@ server.registerTool(
   async ({ pageUuid, left, top, right, bottom, includeComponents, includeWires }) => {
     try {
       if (left > right || top > bottom) throw new Error("Invalid region bounds");
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires });
+      const page = await projectCache.getPage(pageUuid, { includeWires });
       const inside = (x, y) => x >= left && x <= right && y >= top && y <= bottom;
       const components = includeComponents
         ? page.components.filter((component) => inside(component.x, component.y))
@@ -228,6 +293,64 @@ server.registerTool(
         components,
         wires,
       }));
+    } catch (error) {
+      return toolError(error);
+    }
+  },
+);
+
+server.registerTool(
+  "schematic_get_page_occupancy",
+  {
+    description: "Build or reuse a placement-aware two-dimensional occupancy grid. It reports literal geometry coverage separately from blocked placement area, including clearances, sheet border and title block.",
+    inputSchema: {
+      pageUuid: z.string().min(1),
+      cellSize: z.number().min(2).max(50).default(5),
+      componentClearance: z.number().min(0).max(200).default(10),
+      portClearance: z.number().min(0).max(200).default(10),
+      wireClearance: z.number().min(0).max(100).default(5),
+      borderMargin: z.number().min(0).max(200).default(20),
+      reserveTitleBlock: z.boolean().default(true),
+      includeRows: z.boolean().default(false),
+    },
+  },
+  async ({ pageUuid, cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock, includeRows }) => {
+    try {
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
+      const grid = pageOccupancy.get(pageUuid, page, { cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock });
+      return toolResult(grid.describe({ includeRows }));
+    } catch (error) {
+      return toolError(error);
+    }
+  },
+);
+
+server.registerTool(
+  "schematic_find_free_regions",
+  {
+    description: "Find one or more empty rectangular placement regions using the cached page occupancy grid.",
+    inputSchema: {
+      pageUuid: z.string().min(1),
+      width: z.number().positive(),
+      height: z.number().positive(),
+      count: z.number().int().min(1).max(50).default(1),
+      clearance: z.number().min(0).max(200).default(10),
+      preferredX: z.number().optional(),
+      preferredY: z.number().optional(),
+      cellSize: z.number().min(2).max(50).default(5),
+      componentClearance: z.number().min(0).max(200).default(10),
+      portClearance: z.number().min(0).max(200).default(10),
+      wireClearance: z.number().min(0).max(100).default(5),
+      borderMargin: z.number().min(0).max(200).default(20),
+      reserveTitleBlock: z.boolean().default(true),
+    },
+  },
+  async ({ pageUuid, width, height, count, clearance, preferredX, preferredY, cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock }) => {
+    try {
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
+      const grid = pageOccupancy.get(pageUuid, page, { cellSize, componentClearance, portClearance, wireClearance, borderMargin, reserveTitleBlock });
+      const regions = grid.findFreeRectangles({ width, height, count, clearance, preferredX, preferredY });
+      return toolResult({ page: page.page, grid: grid.describe(), requested: { width, height, count, clearance, preferredX, preferredY }, regions });
     } catch (error) {
       return toolError(error);
     }
@@ -257,7 +380,7 @@ server.registerTool(
   async ({ pageUuid }) => {
     try {
       // 可读性分析运行在 MCP 侧，所以先向插件读取完整页面数据。
-      const page = await bridge.call("schematic.inspectPage", { pageUuid, includeWires: true });
+      const page = await projectCache.getPage(pageUuid, { includeWires: true });
       return toolResult(analyzeReadability(page));
     } catch (error) {
       return toolError(error);
@@ -285,9 +408,14 @@ server.registerTool(
  * MCP 侧逐条调用插件可避开 EasyEDA 连续创建图元时的竞态，同时仍复用同一会话备份。
  */
 async function executeOperations(operations, reason) {
+  const affectedPageUuids = [...new Set(operations.map((operation) => operation.pageUuid).filter(Boolean))];
   try {
     return await writes.serialize(async (sessionId) => {
       const { expandedOperations, pinPortPlans } = await expandPinPortOperations(operations);
+      const validation = await bridge.call("operations.validate", { operations: expandedOperations });
+      if (!validation?.valid) {
+        throw new Error(`Operation preflight failed: ${JSON.stringify(validation?.findings || [])}`);
+      }
       const results = [];
       let schematicUuid;
       let backupUuid;
@@ -321,6 +449,15 @@ async function executeOperations(operations, reason) {
     });
   } catch (error) {
     return toolError(error);
+  } finally {
+    pageOccupancy.invalidate(affectedPageUuids);
+    const changesCatalog = operations.some((operation) => operation.type === "delete_page" || operation.type === "rename_page" || operation.type === "rename_schematic");
+    try {
+      if (changesCatalog) await projectCache.rebuildCatalog();
+      else await projectCache.refreshPages(affectedPageUuids);
+    } catch {
+      projectCache.clear();
+    }
   }
 }
 
@@ -329,6 +466,13 @@ function registerWriteTool(name, description, inputSchema, buildOperations) {
   server.registerTool(name, { description, inputSchema }, async (args) =>
     executeOperations(buildOperations(args), args.reason));
 }
+
+registerWriteTool(
+  "schematic_rename_schematic",
+  "Rename one schematic document by UUID. This changes the schematic name, not its individual page names.",
+  { schematicUuid: z.string().min(1), name: z.string().min(1).max(80), reason: z.string().min(1).max(500).default("Rename schematic document") },
+  ({ schematicUuid, name }) => [{ type: "rename_schematic", schematicUuid, name }],
+);
 
 registerWriteTool(
   "schematic_rename_page",
@@ -346,14 +490,34 @@ registerWriteTool(
 
 registerWriteTool(
   "schematic_delete_primitives",
-  "Delete components and wires by primitive ID.",
+  "Delete components, wires, and free-text annotations by primitive ID.",
   {
     pageUuid: z.string().min(1),
     componentIds: z.array(z.string().min(1)).default([]),
     wireIds: z.array(z.string().min(1)).default([]),
+    textIds: z.array(z.string().min(1)).default([]),
     reason: z.string().min(1).max(500).default("删除原理图图元"),
   },
-  ({ pageUuid, componentIds, wireIds }) => [{ type: "delete_primitives", pageUuid, componentIds, wireIds }],
+  ({ pageUuid, componentIds, wireIds, textIds }) => [{ type: "delete_primitives", pageUuid, componentIds, wireIds, textIds }],
+);
+
+registerWriteTool(
+  "schematic_update_net_labels",
+  "Move and/or rename native EasyEDA net labels by primitive ID. Inspect the page first and place each label exactly on its intended wire endpoint or segment.",
+  {
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      labelId: z.string().min(1),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      net: z.string().min(1).max(200).optional(),
+    }).refine(
+      (change) => change.x !== undefined || change.y !== undefined || change.net !== undefined,
+      "Each net-label change must include x, y, or net",
+    )).min(1).max(100),
+    reason: z.string().min(1).max(500).default("Move or rename native net labels"),
+  },
+  ({ pageUuid, changes }) => changes.map((change) => ({ type: "set_net_label", pageUuid, ...change })),
 );
 
 registerWriteTool(
@@ -384,6 +548,26 @@ registerWriteTool(
     reason: z.string().min(1).max(500).default("移动既有原理图器件"),
   },
   ({ pageUuid, movements }) => movements.map((movement) => ({ type: "move_component", pageUuid, ...movement })),
+);
+
+registerWriteTool(
+  "schematic_transform_components",
+  "Move, rotate, and/or mirror existing part components. Omitted fields keep their current values. Returns before/after component and pin coordinates; wires are not modified automatically.",
+  {
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      componentId: z.string().min(1),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      rotation: rotationSchema.optional(),
+      mirror: z.boolean().optional(),
+    }).refine(
+      (change) => change.x !== undefined || change.y !== undefined || change.rotation !== undefined || change.mirror !== undefined,
+      "Each transformation must include x, y, rotation, or mirror",
+    )).min(1).max(50),
+    reason: z.string().min(1).max(500).default("批量移动、旋转或镜像已有器件"),
+  },
+  ({ pageUuid, changes }) => [{ type: "transform_components", pageUuid, changes }],
 );
 
 registerWriteTool(
@@ -447,7 +631,7 @@ registerWriteTool(
 
 registerWriteTool(
   "schematic_create_ports_for_pins",
-  "Create outward-facing ports for selected pins. Reserve for cross-page or genuinely long connections.",
+  "Create outward-facing ports using rectangular symbol/label bounds and obstacle-aware orthogonal routing. Existing components, wires, and earlier ports in the same batch are avoided. Reserve for cross-page or genuinely long connections.",
   {
     pageUuid: z.string().min(1),
     ports: z.array(z.object({
@@ -457,6 +641,38 @@ registerWriteTool(
     reason: z.string().min(1).max(500).default("按引脚朝向创建跨页端口"),
   },
   ({ pageUuid, ports }) => ports.map((port) => ({ type: "create_port_for_pin", pageUuid, ...port })),
+);
+
+registerWriteTool(
+  "schematic_set_no_connects",
+  "Set or clear native EasyEDA no-connect markers on one or more component pins. Inspect the page first and use this only for intentionally unused pins.",
+  {
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      componentId: z.string().min(1),
+      pinNumbers: z.array(z.string().min(1)).min(1).max(100),
+      noConnected: z.boolean().default(true),
+    })).min(1).max(50),
+    reason: z.string().min(1).max(500).default("设置原理图引脚非连接标识"),
+  },
+  ({ pageUuid, changes }) => changes.map((change) => ({ type: "set_no_connects", pageUuid, ...change })),
+);
+
+registerWriteTool(
+  "schematic_set_component_attributes",
+  "Write real EasyEDA component attributes such as Value and control their native schematic visibility. This updates BOM/property data; it does not create free text.",
+  {
+    pageUuid: z.string().min(1),
+    changes: z.array(z.object({
+      componentId: z.string().min(1),
+      key: z.string().min(1).max(100),
+      value: z.string().max(500),
+      keyVisible: z.boolean().default(false),
+      valueVisible: z.boolean().default(true),
+    })).min(1).max(100),
+    reason: z.string().min(1).max(500).default("修改器件原生属性"),
+  },
+  ({ pageUuid, changes }) => changes.map((change) => ({ type: "set_component_attribute", pageUuid, ...change })),
 );
 
 registerWriteTool(
@@ -479,6 +695,7 @@ registerWriteTool(
  */
 async function expandPinPortOperations(operations) {
   const pageCache = new Map();
+  const occupancyCache = new Map();
   const expandedOperations = [];
   const pinPortPlans = [];
 
@@ -490,8 +707,13 @@ async function expandPinPortOperations(operations) {
 
     let page = pageCache.get(operation.pageUuid);
     if (!page) {
-      page = await bridge.call("schematic.inspectPage", { pageUuid: operation.pageUuid, includeWires: false });
+      page = await bridge.call("schematic.inspectPage", { pageUuid: operation.pageUuid, includeWires: true });
       pageCache.set(operation.pageUuid, page);
+    }
+    let occupancy = occupancyCache.get(operation.pageUuid);
+    if (!occupancy) {
+      occupancy = pageOccupancy.get(operation.pageUuid, page);
+      occupancyCache.set(operation.pageUuid, occupancy);
     }
     const component = page.components?.find((item) => item.id === operation.componentId);
     if (!component) throw new Error(`Component not found: ${operation.componentId}`);
@@ -501,25 +723,39 @@ async function expandPinPortOperations(operations) {
     const plan = planPortForPin(component, operation.pinNumber, {
       offset: operation.offset,
       axisBias: operation.axisBias,
+      obstacles: page,
+      net: operation.net,
+      direction: operation.direction,
+      occupancy,
     });
 
-    // 先放端口再画线；导线显式携带 net，避免 EasyEDA 对 undefined 网络报 create failed。
+    // 插件侧将端口与导线作为一个可补偿操作：端口实测矩形冲突或画线失败时会删除已创建图元。
     expandedOperations.push({
-      type: "create_net_port",
+      type: "create_port_with_wire",
       pageUuid: operation.pageUuid,
+      sourceComponentId: operation.componentId,
       direction: operation.direction,
       net: operation.net,
       x: plan.port.x,
       y: plan.port.y,
       rotation: plan.port.rotation,
-    });
-    expandedOperations.push({
-      type: "create_wire",
-      pageUuid: operation.pageUuid,
       line: plan.line,
-      net: operation.net,
+      expectedBounds: plan.portBounds,
     });
     pinPortPlans.push({ net: operation.net, ...plan });
+
+    // Keep the geometry snapshot current so later ports in this batch avoid earlier planned ports and wires.
+    page.components.push({
+      id: `planned-port-${pinPortPlans.length}`,
+      type: "netport",
+      x: plan.port.x,
+      y: plan.port.y,
+      bbox: plan.portBounds,
+      pins: [{ number: "1", x: plan.port.x, y: plan.port.y }],
+    });
+    page.wires.push({ id: `planned-wire-${pinPortPlans.length}`, net: operation.net, line: plan.line });
+    occupancy.markBounds(plan.portBounds, OCCUPANCY.PORT | OCCUPANCY.PLANNED);
+    occupancy.markPolyline(plan.line, OCCUPANCY.WIRE | OCCUPANCY.PLANNED);
   }
   if (expandedOperations.length > 100) {
     throw new Error(`Expanded operation count ${expandedOperations.length} exceeds the plugin limit of 100`);

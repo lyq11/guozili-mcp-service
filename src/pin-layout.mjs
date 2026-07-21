@@ -71,9 +71,29 @@ export function inferPinLayout(component, { axisBias = 1 } = {}) {
  * @param {string} pinNumber
  * @param {{offset?: number, axisBias?: number}} [options]
  */
-export function planPortForPin(component, pinNumber, { offset = 40, axisBias = 1 } = {}) {
+export function planPortForPin(component, pinNumber, {
+  offset = 40,
+  axisBias = 1,
+  obstacles,
+  clearance = 10,
+  laneSpacing = 20,
+  maxLanes = 6,
+  requireClearPath = true,
+  net = "",
+  direction: portDirection = "BI",
+  occupancy,
+} = {}) {
   if (!Number.isFinite(offset) || offset <= 0) {
     throw new TypeError("offset must be a positive finite number");
+  }
+  if (!Number.isFinite(clearance) || clearance < 0) {
+    throw new TypeError("clearance must be a non-negative finite number");
+  }
+  if (!Number.isFinite(laneSpacing) || laneSpacing <= 0) {
+    throw new TypeError("laneSpacing must be a positive finite number");
+  }
+  if (!Number.isInteger(maxLanes) || maxLanes < 0 || maxLanes > 20) {
+    throw new TypeError("maxLanes must be an integer from 0 to 20");
   }
 
   const layout = inferPinLayout(component, { axisBias });
@@ -81,11 +101,17 @@ export function planPortForPin(component, pinNumber, { offset = 40, axisBias = 1
   if (!pin) throw new Error(`Pin ${pinNumber} not found on component ${component.id ?? "unknown"}`);
 
   const direction = PORT_BY_SIDE[pin.side];
-  const port = {
-    x: pin.x + direction.dx * offset,
-    y: pin.y + direction.dy * offset,
-    rotation: direction.rotation,
-  };
+  const candidates = makePortCandidates(pin, direction, offset, laneSpacing, maxLanes, net, portDirection);
+  const evaluated = candidates.map((candidate) => ({
+    ...candidate,
+    ...evaluatePortCandidate(candidate, component, obstacles, clearance, occupancy),
+  })).sort((left, right) => left.score - right.score || left.length - right.length || left.bends - right.bends);
+  const selected = evaluated[0];
+  if (requireClearPath && (selected.blockingComponents > 0 || selected.wireCrossings > 0
+    || selected.portWireOverlaps > 0 || selected.gridBlockedCells > 0)) {
+    throw new Error(`No clear outward port route for pin ${pinNumber} on component ${component.id ?? "unknown"}`);
+  }
+  const port = { ...selected.port, rotation: direction.rotation };
   return {
     componentId: component.id,
     pinNumber: String(pin.number),
@@ -94,8 +120,210 @@ export function planPortForPin(component, pinNumber, { offset = 40, axisBias = 1
     layoutKind: layout.kind,
     pin: { x: pin.x, y: pin.y },
     port,
-    line: [pin.x, pin.y, port.x, port.y],
+    portBounds: selected.portBounds,
+    line: selected.line,
+    routing: {
+      strategy: selected.strategy,
+      score: selected.score,
+      bends: selected.bends,
+      length: selected.length,
+      blockingComponents: selected.blockingComponents,
+      wireCrossings: selected.wireCrossings,
+      portWireOverlaps: selected.portWireOverlaps,
+      gridBlockedCells: selected.gridBlockedCells,
+      candidatesEvaluated: evaluated.length,
+      clear: selected.blockingComponents === 0 && selected.wireCrossings === 0
+        && selected.portWireOverlaps === 0 && selected.gridBlockedCells === 0,
+    },
   };
+}
+
+function makePortCandidates(pin, direction, offset, laneSpacing, maxLanes, net, portDirection) {
+  const candidates = [];
+  const horizontal = direction.dx !== 0;
+  for (let distanceStep = 0; distanceStep <= 6; distanceStep++) {
+    const distance = offset + distanceStep * laneSpacing;
+    const directPort = { x: pin.x + direction.dx * distance, y: pin.y + direction.dy * distance };
+    candidates.push({
+      strategy: distanceStep === 0 ? "direct" : "extended-direct",
+      port: directPort,
+      portBounds: estimatePortBounds(directPort, direction.rotation, net, portDirection),
+      line: [pin.x, pin.y, directPort.x, directPort.y],
+    });
+    const stubDistance = Math.min(10, distance / 3);
+    for (let lane = 1; lane <= maxLanes; lane++) {
+      for (const sign of [-1, 1]) {
+        const shift = sign * lane * laneSpacing;
+        const port = horizontal
+          ? { x: pin.x + direction.dx * distance, y: pin.y + shift }
+          : { x: pin.x + shift, y: pin.y + direction.dy * distance };
+        const stub = { x: pin.x + direction.dx * stubDistance, y: pin.y + direction.dy * stubDistance };
+        const corner = horizontal ? { x: stub.x, y: port.y } : { x: port.x, y: stub.y };
+        candidates.push({
+          strategy: "detour",
+          port,
+          portBounds: estimatePortBounds(port, direction.rotation, net, portDirection),
+          line: [pin.x, pin.y, stub.x, stub.y, corner.x, corner.y, port.x, port.y],
+        });
+      }
+    }
+  }
+  return candidates;
+}
+
+function evaluatePortCandidate(candidate, sourceComponent, obstacles, clearance, occupancy) {
+  const routeSegments = polylineSegments(candidate.line);
+  const components = Array.isArray(obstacles?.components) ? obstacles.components : [];
+  const wires = Array.isArray(obstacles?.wires) ? obstacles.wires : [];
+  let blockingComponents = 0;
+  for (const component of components) {
+    if (!component) continue;
+    const bounds = componentBounds(component, clearance);
+    const portOverlaps = rectanglesOverlap(candidate.portBounds, bounds);
+    const routeOverlaps = component.id !== sourceComponent.id
+      && routeSegments.some((segment) => segmentIntersectsBounds(segment, bounds));
+    if (portOverlaps || routeOverlaps) {
+      blockingComponents++;
+    }
+  }
+
+  let wireCrossings = 0;
+  let portWireOverlaps = 0;
+  const existingSegments = wires.flatMap((wire) => polylineSegments(wire?.line));
+  for (const existing of existingSegments) {
+    if (segmentIntersectsBounds(existing, candidate.portBounds)) portWireOverlaps++;
+  }
+  for (const route of routeSegments) {
+    for (const existing of existingSegments) {
+      if (segmentsConflict(route, existing, { x: candidate.line[0], y: candidate.line[1] })) wireCrossings++;
+    }
+  }
+  const length = routeSegments.reduce((sum, segment) => sum + Math.abs(segment.x2 - segment.x1) + Math.abs(segment.y2 - segment.y1), 0);
+  const bends = Math.max(0, routeSegments.length - 1);
+  const gridBlockedCells = occupancy && typeof occupancy.countBounds === "function"
+    ? occupancy.countBounds(candidate.portBounds)
+    : 0;
+  return {
+    blockingComponents,
+    wireCrossings,
+    portWireOverlaps,
+    gridBlockedCells,
+    length,
+    bends,
+    score: blockingComponents * 100000 + gridBlockedCells * 50000 + portWireOverlaps * 10000
+      + wireCrossings * 1000 + bends * 20 + length,
+  };
+}
+
+function componentBounds(component, padding) {
+  if (component.bbox && Number.isFinite(component.bbox.minX) && Number.isFinite(component.bbox.minY)
+    && Number.isFinite(component.bbox.maxX) && Number.isFinite(component.bbox.maxY)) {
+    const bounds = {
+      left: component.bbox.minX - padding,
+      top: component.bbox.minY - padding,
+      right: component.bbox.maxX + padding,
+      bottom: component.bbox.maxY + padding,
+    };
+    if (componentBoundsArePlausible(component, bounds, padding)) return bounds;
+  }
+  if (component.bbox && Number.isFinite(component.bbox.left) && Number.isFinite(component.bbox.top)
+    && Number.isFinite(component.bbox.right) && Number.isFinite(component.bbox.bottom)) {
+    const bounds = {
+      left: component.bbox.left - padding,
+      top: component.bbox.top - padding,
+      right: component.bbox.right + padding,
+      bottom: component.bbox.bottom + padding,
+    };
+    if (componentBoundsArePlausible(component, bounds, padding)) return bounds;
+  }
+  const points = [{ x: component.x, y: component.y }, ...(Array.isArray(component.pins) ? component.pins : [])]
+    .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  return {
+    left: Math.min(...xs) - padding,
+    top: Math.min(...ys) - padding,
+    right: Math.max(...xs) + padding,
+    bottom: Math.max(...ys) + padding,
+  };
+}
+
+function componentBoundsArePlausible(component, bounds, padding) {
+  if (!Number.isFinite(component?.x) || !Number.isFinite(component?.y)) return true;
+  const pins = (component.pins || []).filter((pin) => Number.isFinite(pin?.x) && Number.isFinite(pin?.y));
+  const pinReachX = pins.reduce((maximum, pin) => Math.max(maximum, Math.abs(pin.x - component.x)), 0);
+  const pinReachY = pins.reduce((maximum, pin) => Math.max(maximum, Math.abs(pin.y - component.y)), 0);
+  const labelAllowance = Math.min(300, 40 + Array.from(String(component.net || "")).length * 8);
+  const allowanceX = Math.max(120, pinReachX + 120, labelAllowance) + padding;
+  const allowanceY = Math.max(120, pinReachY + 120) + padding;
+  return bounds.left >= component.x - allowanceX && bounds.right <= component.x + allowanceX
+    && bounds.top >= component.y - allowanceY && bounds.bottom <= component.y + allowanceY;
+}
+
+/** Conservative rectangle for a not-yet-created port, including its symbol and visible net label. */
+function estimatePortBounds(port, rotation, net, direction) {
+  const labelLength = Array.from(String(net || "")).length;
+  const directionLength = Array.from(String(direction || "")).length;
+  const horizontalWidth = Math.max(40, 24 + labelLength * 7 + directionLength * 3);
+  const horizontalHeight = 20;
+  const vertical = rotation === 90 || rotation === 270;
+  const width = vertical ? horizontalHeight : horizontalWidth;
+  const height = vertical ? horizontalWidth : horizontalHeight;
+  return makeBounds(port.x - width / 2, port.y - height / 2, port.x + width / 2, port.y + height / 2);
+}
+
+function rectanglesOverlap(left, right) {
+  return !(left.right < right.left || left.left > right.right || left.bottom < right.top || left.top > right.bottom);
+}
+
+function polylineSegments(line) {
+  if (!Array.isArray(line)) return [];
+  if (line.length > 0 && Array.isArray(line[0])) return line.flatMap(polylineSegments);
+  const result = [];
+  for (let index = 0; index + 3 < line.length; index += 2) {
+    result.push({ x1: line[index], y1: line[index + 1], x2: line[index + 2], y2: line[index + 3] });
+  }
+  return result.filter((segment) => Object.values(segment).every(Number.isFinite));
+}
+
+function pointInsideBounds(point, bounds) {
+  return point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom;
+}
+
+function segmentIntersectsBounds(segment, bounds) {
+  if (pointInsideBounds({ x: segment.x1, y: segment.y1 }, bounds) || pointInsideBounds({ x: segment.x2, y: segment.y2 }, bounds)) return true;
+  if (segment.y1 === segment.y2) {
+    return segment.y1 >= bounds.top && segment.y1 <= bounds.bottom
+      && Math.max(segment.x1, segment.x2) >= bounds.left && Math.min(segment.x1, segment.x2) <= bounds.right;
+  }
+  if (segment.x1 === segment.x2) {
+    return segment.x1 >= bounds.left && segment.x1 <= bounds.right
+      && Math.max(segment.y1, segment.y2) >= bounds.top && Math.min(segment.y1, segment.y2) <= bounds.bottom;
+  }
+  return true;
+}
+
+function segmentsConflict(left, right, allowedEndpoint) {
+  const leftHorizontal = left.y1 === left.y2;
+  const rightHorizontal = right.y1 === right.y2;
+  if (leftHorizontal !== rightHorizontal) {
+    const horizontal = leftHorizontal ? left : right;
+    const vertical = leftHorizontal ? right : left;
+    const point = { x: vertical.x1, y: horizontal.y1 };
+    const intersects = point.x >= Math.min(horizontal.x1, horizontal.x2) && point.x <= Math.max(horizontal.x1, horizontal.x2)
+      && point.y >= Math.min(vertical.y1, vertical.y2) && point.y <= Math.max(vertical.y1, vertical.y2);
+    return intersects && (point.x !== allowedEndpoint.x || point.y !== allowedEndpoint.y);
+  }
+  if (leftHorizontal) {
+    if (left.y1 !== right.y1) return false;
+    const overlapStart = Math.max(Math.min(left.x1, left.x2), Math.min(right.x1, right.x2));
+    const overlapEnd = Math.min(Math.max(left.x1, left.x2), Math.max(right.x1, right.x2));
+    return overlapStart <= overlapEnd && !(overlapStart === overlapEnd && overlapStart === allowedEndpoint.x && left.y1 === allowedEndpoint.y);
+  }
+  if (left.x1 !== right.x1) return false;
+  const overlapStart = Math.max(Math.min(left.y1, left.y2), Math.min(right.y1, right.y2));
+  const overlapEnd = Math.min(Math.max(left.y1, left.y2), Math.max(right.y1, right.y2));
+  return overlapStart <= overlapEnd && !(overlapStart === overlapEnd && overlapStart === allowedEndpoint.y && left.x1 === allowedEndpoint.x);
 }
 
 /**

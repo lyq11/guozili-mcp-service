@@ -3,7 +3,7 @@
   "uuid": "e6818569b67a4b3c9eb00426a52aab6c",
   "displayName": "果子狸MCP服务",
   "description": "通过本机结构化白名单 RPC 将嘉立创 EDA 专业版原理图安全接入 MCP 客户端。",
-  "version": "0.2.2",
+  "version": "0.2.13",
   "publisher": "lyq11",
   "engines": {
     "eda": "~3.2.0"
@@ -31,6 +31,7 @@
       "title": "果子狸MCP服务",
       "menuItems": [
         { "id": "Reconnect", "title": "重新连接", "registerFn": "reconnect" },
+        { "id": "ConfigurePort", "title": "设置 MCP 端口", "registerFn": "configurePort" },
         { "id": "StatusPanel", "title": "显示状态悬浮框", "registerFn": "showStatusPanel" },
         { "id": "Stop", "title": "停止连接", "registerFn": "stopConnection" },
         { "id": "About", "title": "连接状态", "registerFn": "about" }
@@ -41,6 +42,7 @@
       "title": "果子狸MCP服务",
       "menuItems": [
         { "id": "Reconnect", "title": "重新连接", "registerFn": "reconnect" },
+        { "id": "ConfigurePort", "title": "设置 MCP 端口", "registerFn": "configurePort" },
         { "id": "StatusPanel", "title": "显示状态悬浮框", "registerFn": "showStatusPanel" },
         { "id": "Stop", "title": "停止连接", "registerFn": "stopConnection" },
         { "id": "About", "title": "连接状态", "registerFn": "about" }
