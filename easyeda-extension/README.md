@@ -46,4 +46,8 @@
 - 源码：`https://github.com/lyq11/guozili-mcp-service`
 - 问题反馈：`https://github.com/lyq11/guozili-mcp-service/issues`
 
+## 待补充
+
+- 缺少功能演示图或功能演示 GIF。
+
 许可证：Apache-2.0。
