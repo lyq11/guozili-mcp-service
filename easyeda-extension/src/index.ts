@@ -13,6 +13,9 @@ const HEARTBEAT_TIMEOUT_MS = 5000;
 const MBUS_TOPIC_STATUS = 'easyeda-mcp-status';
 const MBUS_TOPIC_CONTROL = 'easyeda-mcp-control';
 const STATUS_FRAME_ID = 'easyeda-mcp-status-frame';
+const PORT_CONFIG_KEY = 'mcpPort';
+const DEBUG_CONFIG_KEY = 'debugEnabled';
+const DEBUG_VALUE_LIMIT = 4000;
 
 // 以下变量描述当前插件实例的连接状态；不会跨 EasyEDA 重启持久化。
 let currentPort: number | null = null;
@@ -26,6 +29,9 @@ let heartbeatPending = false;
 let messageBusRegistered = false;
 let statusFrameFingerprint = '';
 let statusFrameClosedByUser = false;
+let debugEnabled = false;
+// null 表示按默认范围自动扫描；数字表示只连接用户指定的单个端口。
+let preferredPort: number | null = null;
 
 interface ConnectionStatus {
   connected: boolean;
@@ -33,11 +39,49 @@ interface ConnectionStatus {
   stopped: boolean;
   port: number | null;
   windowId: string | null;
+  preferredPort: number | null;
+  debugEnabled: boolean;
+}
+
+/** Debug 日志只写入本机开发者控制台，并限制单条载荷，避免大页面快照淹没控制台。 */
+function debugLog(event: string, details?: unknown, level: 'debug' | 'error' = 'debug'): void {
+  if (!debugEnabled) return;
+  let suffix = '';
+  if (details !== undefined) {
+    try {
+      const serialized = JSON.stringify(details, (key, value) => key === 'token' ? '[redacted]' : value);
+      suffix = ` ${serialized.length > DEBUG_VALUE_LIMIT ? `${serialized.slice(0, DEBUG_VALUE_LIMIT)}…` : serialized}`;
+    } catch { suffix = ` ${String(details)}`; }
+  }
+  const output = `[果子狸MCP:debug] ${new Date().toISOString()} ${event}${suffix}`;
+  if (level === 'error') console.error(output);
+  else console.debug(output);
+}
+
+/** 将存储或对话框中的值规范化为合法 TCP 端口，0 和空值表示自动扫描。 */
+function normalizePreferredPort(value: unknown): number | null {
+  if (value === undefined || value === null || value === '' || value === 0 || value === '0') return null;
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+/** 从 EasyEDA 扩展用户配置中读取持久化端口。 */
+function loadPreferredPort(): void {
+  try { preferredPort = normalizePreferredPort(eda.sys_Storage.getExtensionUserConfig(PORT_CONFIG_KEY)); }
+  catch { preferredPort = null; }
+}
+
+/** Debug 开关与端口一样按扩展用户持久化，重启 EasyEDA 后仍然有效。 */
+function loadDebugEnabled(): void {
+  try {
+    const value = eda.sys_Storage.getExtensionUserConfig(DEBUG_CONFIG_KEY);
+    debugEnabled = value === true || value === 1 || value === '1' || value === 'true';
+  } catch { debugEnabled = false; }
 }
 
 /** 生成可通过消息总线和悬浮窗读取的连接状态快照。 */
 function getConnectionStatus(): ConnectionStatus {
-  return { connected, connecting: !connected && !stopped, stopped, port: currentPort, windowId };
+  return { connected, connecting: !connected && !stopped, stopped, port: currentPort, windowId, preferredPort, debugEnabled };
 }
 
 /**
@@ -52,13 +96,15 @@ async function renderStatusFrame(force = false): Promise<void> {
   let pageName = '未打开原理图';
   try { pageName = (await eda.dmt_Schematic.getCurrentSchematicPageInfo())?.name || pageName; } catch {}
   const state = info.connected ? 'connected' : info.stopped ? 'stopped' : 'waiting';
-  const fingerprint = `${state}|${info.port}|${pageName}`;
+  const fingerprint = `${state}|${info.port}|${info.preferredPort}|${info.debugEnabled}|${pageName}`;
   if (!force && fingerprint === statusFrameFingerprint) return;
   statusFrameFingerprint = fingerprint;
   // EasyEDA 没有原地切换 iframe 内容的接口，因此状态变化时先关旧窗再开新窗。
   await eda.sys_IFrame.closeIFrame(STATUS_FRAME_ID).catch(() => false);
   const frameProps = {
-    title: info.connected ? `果子狸MCP · ${pageName} · ${info.port}` : `果子狸MCP · ${pageName}`,
+    title: info.connected
+      ? `果子狸MCP · ${pageName} · ${info.port}${info.debugEnabled ? ' · DEBUG' : ''}`
+      : `果子狸MCP · ${pageName}${info.preferredPort ? ` · 等待 ${info.preferredPort}` : ''}${info.debugEnabled ? ' · DEBUG' : ''}`,
     x: 24,
     y: 88,
     grayscaleMask: false,
@@ -85,6 +131,19 @@ function performStop(): void {
   disconnect();
 }
 
+/** 应用固定端口或自动扫描模式，并立即重建连接。 */
+function performSetPort(port: number | null): void {
+  preferredPort = port;
+  performReconnect();
+}
+
+/** 切换 Debug 后重连，使 MCP 网关也能按当前插件设置输出该窗口的 RPC 日志。 */
+function performSetDebug(enabled: boolean): void {
+  debugEnabled = enabled;
+  debugLog('debug-enabled', { enabled });
+  performReconnect();
+}
+
 /**
  * 注册插件内部消息总线服务。
  * 这使菜单命令和可能重复加载的入口可以共享同一份连接状态与控制动作。
@@ -92,23 +151,31 @@ function performStop(): void {
 function ensureMessageBusServices(): void {
   if (messageBusRegistered) return;
   eda.sys_MessageBus.rpcService(MBUS_TOPIC_STATUS, () => getConnectionStatus());
-  eda.sys_MessageBus.rpcService(MBUS_TOPIC_CONTROL, (request?: {command?: string}) => {
+  eda.sys_MessageBus.rpcService(MBUS_TOPIC_CONTROL, (request?: {command?: string; port?: number | null; enabled?: boolean}) => {
     if (request?.command === 'reconnect') performReconnect();
     if (request?.command === 'stop') performStop();
+    if (request?.command === 'setPort') performSetPort(normalizePreferredPort(request.port));
+    if (request?.command === 'setDebug') performSetDebug(Boolean(request.enabled));
     return { handled: true, ...getConnectionStatus() };
   });
   messageBusRegistered = true;
 }
 
 /** 优先通过消息总线控制已有实例；没有服务时回退到当前实例直接执行。 */
-async function dispatchControl(command: 'reconnect' | 'stop'): Promise<void> {
+async function dispatchControl(command: 'reconnect' | 'stop' | 'setPort' | 'setDebug', value?: number | null | boolean): Promise<void> {
   try {
-    const response = await eda.sys_MessageBus.rpcCall(MBUS_TOPIC_CONTROL, { command }, 500) as {handled?: boolean};
+    const response = await eda.sys_MessageBus.rpcCall(MBUS_TOPIC_CONTROL, {
+      command,
+      port: command === 'setPort' ? value : undefined,
+      enabled: command === 'setDebug' ? value : undefined,
+    }, 500) as {handled?: boolean};
     if (response?.handled) return;
   } catch {}
   ensureMessageBusServices();
   if (command === 'reconnect') performReconnect();
-  else performStop();
+  else if (command === 'stop') performStop();
+  else if (command === 'setPort') performSetPort(normalizePreferredPort(value));
+  else performSetDebug(Boolean(value));
 }
 
 /** 将对象序列化后发送给 MCP；不接受外部传入 WebSocket 地址。 */
@@ -126,6 +193,7 @@ function clearTimers(): void {
 
 /** 使当前扫描代次失效并关闭 WebSocket，然后刷新状态窗。 */
 function disconnect(): void {
+  debugLog('disconnect', { port: currentPort, windowId });
   scanGeneration += 1;
   connected = false;
   currentPort = null;
@@ -141,6 +209,7 @@ async function handleMessage(message: Record<string, unknown>): Promise<void> {
   if (message.type === 'registered') {
     connected = true;
     heartbeatPending = false;
+    debugLog('registered', { port: currentPort, windowId });
     eda.sys_Message.showToastMessage(`果子狸MCP服务已连接（端口 ${currentPort}）`);
     void renderStatusFrame();
     return;
@@ -156,11 +225,18 @@ async function handleMessage(message: Record<string, unknown>): Promise<void> {
   if (message.type !== 'rpc') return;
   const request = message as unknown as RpcRequest;
   if (!request.id || typeof request.method !== 'string') return;
+  const startedAt = Date.now();
+  debugLog('rpc-call', { id: request.id, method: request.method, params: request.params || {} });
   try {
     // dispatch 只允许 handlers.ts 映射表中的方法，不能执行任意代码。
     const result = await dispatch(request.method, request.params || {});
+    debugLog('rpc-result', { id: request.id, method: request.method, durationMs: Date.now() - startedAt, result: result ?? null });
     send({ type: 'result', id: request.id, result: result ?? null, timestamp: Date.now() });
   } catch (error) {
+    debugLog('rpc-error', {
+      id: request.id, method: request.method, durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    }, 'error');
     send({
       type: 'error', id: request.id,
       error: error instanceof Error ? error.message : String(error), timestamp: Date.now(),
@@ -174,6 +250,7 @@ async function handleMessage(message: Record<string, unknown>): Promise<void> {
  */
 function tryPort(port: number, generation: number): Promise<boolean> {
   return new Promise(resolve => {
+    debugLog('connect-attempt', { port, generation });
     let settled = false;
     // WebSocket 回调和超时可能同时到达，settled 保证 Promise 只完成一次。
     const finish = (value: boolean) => {
@@ -198,16 +275,18 @@ function tryPort(port: number, generation: number): Promise<boolean> {
               if (message.service !== SERVICE_ID || message.protocolVersion !== PROTOCOL_VERSION) { finish(false); return; }
               currentPort = port;
               windowId = crypto.randomUUID();
+              debugLog('handshake', { port, protocolVersion: message.protocolVersion, windowId });
               send({
                 type: 'register', token: AUTH_TOKEN, protocolVersion: PROTOCOL_VERSION,
-                windowId, extensionVersion: extensionConfig.version, capabilities: CAPABILITIES, timestamp: Date.now(),
+                windowId, extensionVersion: extensionConfig.version, capabilities: CAPABILITIES,
+                debug: debugEnabled, timestamp: Date.now(),
               });
               finish(true);
               return;
             }
             await handleMessage(message);
           } catch (error) {
-            console.error('[果子狸MCP] 消息无效', error);
+            debugLog('invalid-message', { error: error instanceof Error ? error.message : String(error) }, 'error');
           }
         },
         () => {},
@@ -221,7 +300,10 @@ async function scanAndConnect(): Promise<void> {
   if (stopped) return;
   const generation = ++scanGeneration;
   connected = false;
-  for (let port = PORT_START; port <= PORT_END; port += 1) {
+  const ports = preferredPort === null
+    ? Array.from({ length: PORT_END - PORT_START + 1 }, (_, index) => PORT_START + index)
+    : [preferredPort];
+  for (const port of ports) {
     if (generation !== scanGeneration || stopped) return;
     if (await tryPort(port, generation)) {
       // 心跳请求发出后若 5 秒仍未收到 pong，就重建整条连接。
@@ -247,6 +329,8 @@ async function scanAndConnect(): Promise<void> {
 
 /** EasyEDA 启动完成时的插件生命周期入口。 */
 export function activate(_status?: 'onStartupFinished', _arg?: string): void {
+  loadPreferredPort();
+  loadDebugEnabled();
   ensureMessageBusServices();
   stopped = false;
   void scanAndConnect();
@@ -271,13 +355,63 @@ export function stopConnection(): void {
   eda.sys_Message.showToastMessage('果子狸MCP服务连接已停止');
 }
 
+/** 菜单命令：设置固定 MCP 端口；输入 0 可恢复默认范围自动扫描。 */
+export function configurePort(): void {
+  eda.sys_Dialog.showInputDialog(
+    '请输入本机 MCP 服务端口号。',
+    `输入 0 恢复自动扫描 ${PORT_START}–${PORT_END}。`,
+    '设置 MCP 端口',
+    'number',
+    preferredPort ?? currentPort ?? PORT_START,
+    { min: 0, max: 65535, step: 1, placeholder: String(PORT_START) },
+    async (value: unknown) => {
+      if (value === undefined || value === null) return;
+      const raw = String(value).trim();
+      const numeric = Number(raw);
+      if (raw === '' || !Number.isInteger(numeric) || numeric < 0 || numeric > 65535) {
+        eda.sys_Dialog.showInformationMessage('请输入 0 或 1–65535 之间的整数端口号。', '端口号无效');
+        return;
+      }
+      const port = normalizePreferredPort(numeric);
+      const saved = await eda.sys_Storage.setExtensionUserConfig(PORT_CONFIG_KEY, port ?? 0);
+      if (!saved) {
+        eda.sys_Dialog.showInformationMessage('端口配置保存失败，请重试。', '果子狸MCP服务');
+        return;
+      }
+      await dispatchControl('setPort', port);
+      eda.sys_Message.showToastMessage(port === null
+        ? `已恢复自动扫描端口 ${PORT_START}–${PORT_END}`
+        : `已固定 MCP 端口为 ${port}，正在重新连接`);
+    },
+  );
+}
+
+/** 菜单命令：持久化切换 Debug 日志；输出可在 EasyEDA 开发者控制台中查看。 */
+export async function toggleDebug(): Promise<void> {
+  let info = getConnectionStatus();
+  try { info = await eda.sys_MessageBus.rpcCall(MBUS_TOPIC_STATUS, undefined, 500) as ConnectionStatus; } catch {}
+  const enabled = !info.debugEnabled;
+  const saved = await eda.sys_Storage.setExtensionUserConfig(DEBUG_CONFIG_KEY, enabled);
+  if (!saved) {
+    eda.sys_Dialog.showInformationMessage('Debug 配置保存失败，请重试。', '果子狸MCP服务');
+    return;
+  }
+  await dispatchControl('setDebug', enabled);
+  eda.sys_Message.showToastMessage(enabled
+    ? 'Debug 日志已开启，请在 EasyEDA 开发者控制台查看'
+    : 'Debug 日志已关闭');
+}
+
 /** 菜单命令：显示版本、协议和当前连接信息。 */
 export async function about(): Promise<void> {
   let info = getConnectionStatus();
   try { info = await eda.sys_MessageBus.rpcCall(MBUS_TOPIC_STATUS, undefined, 500) as ConnectionStatus; } catch {}
+  const mode = info.preferredPort === null
+    ? `自动扫描：${PORT_START}–${PORT_END}`
+    : `固定端口：${info.preferredPort}`;
   const status = info.connected ? `已连接\n端口：${info.port}\n窗口：${info.windowId}` : info.stopped ? '已停止' : '正在等待 MCP 服务';
   eda.sys_Dialog.showInformationMessage(
-    `果子狸MCP服务 v${extensionConfig.version}\n${status}\n协议：RPC v${PROTOCOL_VERSION}\n不支持任意 JavaScript 执行`,
+    `果子狸MCP服务 v${extensionConfig.version}\n${status}\n连接模式：${mode}\nDebug：${info.debugEnabled ? '已开启（输出到开发者控制台）' : '已关闭'}\n协议：RPC v${PROTOCOL_VERSION}\n不支持任意 JavaScript 执行`,
     '果子狸MCP服务',
   );
 }

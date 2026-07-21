@@ -5,6 +5,17 @@ import { WebSocketServer, WebSocket } from "ws";
 // MCP 与插件必须使用相同令牌和协议版本。环境变量可覆盖令牌，便于部署时轮换。
 const DEFAULT_TOKEN = "8a0d39d86c764be59260eafb7aa45ff7baf23088c03744dd84cdb186d0411324";
 const PROTOCOL_VERSION = 1;
+const DEBUG_VALUE_LIMIT = 4000;
+
+/** Debug 日志保留足够的调用上下文，同时隐藏令牌并限制大型 EDA 快照的输出长度。 */
+function serializeDebugDetails(details) {
+  try {
+    const value = JSON.stringify(details, (key, item) => key === "token" ? "[redacted]" : item);
+    return value.length > DEBUG_VALUE_LIMIT ? `${value.slice(0, DEBUG_VALUE_LIMIT)}…` : value;
+  } catch {
+    return JSON.stringify({ value: String(details) });
+  }
+}
 
 /** 使用恒定时间比较令牌，减少通过响应时间猜测令牌内容的可能性。 */
 function constantTimeEqual(left, right) {
@@ -26,6 +37,8 @@ export class EasyEdaRpcServer {
     portEnd = Number(process.env.EASYEDA_MCP_PORT_END || 49629),
     token = process.env.EASYEDA_MCP_TOKEN || DEFAULT_TOKEN,
     timeoutMs = Number(process.env.EASYEDA_REQUEST_TIMEOUT_MS || 30_000),
+    debug = process.env.EASYEDA_MCP_DEBUG === "1",
+    logger = console.error,
   } = {}) {
     // 只绑定回环地址，避免局域网设备直接调用编辑器插件。
     this.host = host;
@@ -40,12 +53,16 @@ export class EasyEdaRpcServer {
     this.windows = new Map();
     this.pending = new Map();
     this.startPromise = null;
-    this.debug = process.env.EASYEDA_MCP_DEBUG === "1";
+    this.debug = Boolean(debug);
+    this.logger = logger;
+    this.registrationListeners = new Set();
+    this.disconnectionListeners = new Set();
   }
 
-  /** 仅在 EASYEDA_MCP_DEBUG=1 时向 stderr 输出诊断信息，避免污染 MCP stdout。 */
-  #log(event, details = {}) {
-    if (this.debug) console.error(`[easyeda-mcp:rpc] ${event} ${JSON.stringify(details)}`);
+  /** 环境变量或插件 Debug 开启时写 stderr；MCP stdout 始终只承载协议帧。 */
+  #log(event, details = {}, enabled = this.debug, level = "debug") {
+    if (!enabled) return;
+    this.logger(`[easyeda-mcp:rpc] ${new Date().toISOString()} ${level} ${event} ${serializeDebugDetails(details)}`);
   }
 
   /** 幂等启动；并发调用会等待同一个启动 Promise。 */
@@ -103,7 +120,7 @@ export class EasyEdaRpcServer {
   /** 完成握手、鉴权、心跳应答和 RPC 结果分发。 */
   #handleConnection(socket) {
     this.#log("connected");
-    const connection = { authenticated: false, windowId: null, capabilities: [] };
+    const connection = { authenticated: false, windowId: null, extensionVersion: null, capabilities: [], debug: false };
     socket.send(JSON.stringify({
       type: "handshake",
       service: "easyeda-mcp",
@@ -130,10 +147,21 @@ export class EasyEdaRpcServer {
         connection.authenticated = true;
         // windowId 用来区分多个 EasyEDA 窗口；缺失时由 MCP 生成。
         connection.windowId = String(message.windowId || randomUUID());
+        connection.extensionVersion = typeof message.extensionVersion === "string" ? message.extensionVersion : null;
         connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities : [];
+        connection.debug = message.debug === true;
         this.windows.set(connection.windowId, { socket, connection, registeredAt: new Date().toISOString() });
-        this.#log("registered", { windowId: connection.windowId, capabilities: connection.capabilities });
+        this.#log("registered", {
+          windowId: connection.windowId,
+          extensionVersion: connection.extensionVersion,
+          capabilities: connection.capabilities,
+          debug: connection.debug,
+        }, this.debug || connection.debug);
         socket.send(JSON.stringify({ type: "registered", windowId: connection.windowId, protocolVersion: PROTOCOL_VERSION }));
+        for (const listener of this.registrationListeners) {
+          Promise.resolve().then(() => listener(connection.windowId)).catch((error) =>
+            this.#log("registration-listener-error", { message: error?.message || String(error) }));
+        }
         return;
       }
 
@@ -148,22 +176,51 @@ export class EasyEdaRpcServer {
         if (!request) return;
         clearTimeout(request.timer);
         this.pending.delete(message.id);
-        if (message.type === "error") request.reject(new Error(message.error || "EasyEDA RPC failed"));
-        else request.resolve(message.result);
+        const details = {
+          id: message.id,
+          method: request.method,
+          windowId: connection.windowId,
+          durationMs: Date.now() - request.startedAt,
+        };
+        if (message.type === "error") {
+          this.#log("rpc-error", { ...details, error: message.error || "EasyEDA RPC failed" }, request.debug, "error");
+          request.reject(new Error(message.error || "EasyEDA RPC failed"));
+        } else {
+          this.#log("rpc-result", { ...details, result: message.result }, request.debug);
+          request.resolve(message.result);
+        }
       }
     });
     socket.on("close", () => {
       this.#log("closed", { windowId: connection.windowId });
       clearTimeout(authTimer);
       if (connection.windowId) this.windows.delete(connection.windowId);
+      for (const listener of this.disconnectionListeners) {
+        try { listener(connection.windowId); }
+        catch (error) { this.#log("disconnection-listener-error", { message: error?.message || String(error) }); }
+      }
       // 连接断开后立即拒绝该窗口上的所有待处理请求，避免只能等超时。
       for (const [id, request] of this.pending) {
         if (request.socket !== socket) continue;
         clearTimeout(request.timer);
+        this.#log("rpc-error", {
+          id, method: request.method, windowId: connection.windowId,
+          durationMs: Date.now() - request.startedAt, error: "EasyEDA extension disconnected",
+        }, request.debug, "error");
         request.reject(new Error("EasyEDA extension disconnected"));
         this.pending.delete(id);
       }
     });
+  }
+
+  onRegistration(listener) {
+    this.registrationListeners.add(listener);
+    return () => this.registrationListeners.delete(listener);
+  }
+
+  onDisconnection(listener) {
+    this.disconnectionListeners.add(listener);
+    return () => this.disconnectionListeners.delete(listener);
   }
 
   /** 等待至少一个插件窗口注册；当前实现是一次定时等待，不做高频轮询。 */
@@ -183,13 +240,24 @@ export class EasyEdaRpcServer {
     const target = windowId ? this.windows.get(windowId) : [...this.windows.values()].at(-1);
     if (!target || target.socket.readyState !== WebSocket.OPEN) throw new Error("No active EasyEDA extension window");
     const id = randomUUID();
+    const callDebug = this.debug || target.connection.debug;
+    const startedAt = Date.now();
+    this.#log("rpc-call", { id, method, windowId: target.connection.windowId, params }, callDebug);
     return new Promise((resolve, reject) => {
       // 每个调用都有独立超时；超时后从 pending 删除，迟到应答会被忽略。
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.#log("rpc-error", {
+          id, method, windowId: target.connection.windowId,
+          durationMs: Date.now() - startedAt,
+          error: `timed out after ${this.timeoutMs}ms`,
+        }, callDebug, "error");
         reject(new Error(`EasyEDA RPC ${method} timed out after ${this.timeoutMs}ms`));
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, socket: target.socket });
+      this.pending.set(id, {
+        resolve, reject, timer, socket: target.socket,
+        method, startedAt, debug: callDebug,
+      });
       target.socket.send(JSON.stringify({ type: "rpc", id, method, params, timestamp: Date.now() }));
     });
   }
@@ -203,8 +271,10 @@ export class EasyEdaRpcServer {
       protocolVersion: PROTOCOL_VERSION,
       connectedWindows: [...this.windows.entries()].map(([windowId, value]) => ({
         windowId,
+        extensionVersion: value.connection.extensionVersion,
         registeredAt: value.registeredAt,
         capabilities: value.connection.capabilities,
+        debug: value.connection.debug,
       })),
     };
   }

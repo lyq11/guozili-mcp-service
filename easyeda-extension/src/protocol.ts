@@ -11,8 +11,17 @@ export const CAPABILITIES = [
   'schematic.listPages',
   'schematic.inspectPage',
   'library.searchComponents',
+  'operations.validate',
   'operations.apply',
   'schematic.runDrc',
+  'pcb.listBoards',
+  'pcb.create',
+  'pcb.stackups.list',
+  'pcb.inspect',
+  'pcb.inspectRegion',
+  'pcb.runDrc',
+  'pcb.operations.validate',
+  'pcb.operations.apply',
 ] as const;
 
 /** MCP 发往插件的标准 RPC 请求结构。 */
