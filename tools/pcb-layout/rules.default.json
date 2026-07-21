@@ -1,0 +1,14 @@
+[
+  {
+    "id": "decoupling-cap-100nf",
+    "match": { "designatorPrefix": "C", "value": "100nF" },
+    "placement": "near_target_pin",
+    "maxDistanceMil": 150
+  },
+  {
+    "id": "decoupling-cap-10uf",
+    "match": { "designatorPrefix": "C", "value": "10uF" },
+    "placement": "near_target_pin",
+    "maxDistanceMil": 250
+  }
+]
